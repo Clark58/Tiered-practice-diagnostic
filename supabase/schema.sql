@@ -60,6 +60,7 @@ create table if not exists public.questions (
       'open_response'
     )
   ),
+  template_id text not null default '',
   prompt text not null,
   options jsonb not null default '[]'::jsonb,
   correct_answer jsonb not null default '""'::jsonb,
@@ -69,6 +70,8 @@ create table if not exists public.questions (
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table public.questions add column if not exists template_id text not null default '';
 
 create table if not exists public.student_attempts (
   id uuid primary key default gen_random_uuid(),
@@ -323,6 +326,7 @@ returns table (
   id uuid,
   task_id uuid,
   type text,
+  template_id text,
   prompt text,
   options jsonb,
   correct_answer jsonb,
@@ -336,7 +340,7 @@ language sql
 security definer
 set search_path = public
 as $$
-  select q.id, q.task_id, q.type, q.prompt, q.options, q.correct_answer,
+  select q.id, q.task_id, q.type, q.template_id, q.prompt, q.options, q.correct_answer,
          q.skill_tag, q.grammar_tag, q.sort_order, q.created_at, q.updated_at
   from public.questions q
   join public.tasks t on t.id = q.task_id

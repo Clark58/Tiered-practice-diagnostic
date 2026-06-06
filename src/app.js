@@ -365,7 +365,12 @@ function seedData() {
 
 function loadLocalData() {
   try {
-    return normalizeData(JSON.parse(localStorage.getItem(STORAGE_KEY)) || seedData());
+    const data = normalizeData(JSON.parse(localStorage.getItem(STORAGE_KEY)) || seedData());
+    if (data.__repaired) {
+      delete data.__repaired;
+      saveLocalData(data);
+    }
+    return data;
   } catch {
     return normalizeData(seedData());
   }
@@ -377,20 +382,47 @@ function saveLocalData(data) {
 
 function normalizeData(data) {
   const classStudents = data.class_students || [];
+  const tasks = data.tasks || [];
+  const questions = data.questions || [];
+  let repaired = false;
   if (!classStudents.length && (data.classes || []).some((item) => item.id === "demo-class-1")) {
     classStudents.push(
       { id: "demo-student-1", class_id: "demo-class-1", student_name: "Kevin", gender: "Male", access_code: "G7CN-Kevin", active: true },
       { id: "demo-student-2", class_id: "demo-class-1", student_name: "王明", gender: "男", access_code: "G7CN-王明", active: true },
     );
   }
+  const knownTaskIds = new Set(tasks.map((task) => task.id).filter(Boolean));
+  const orphanTaskIds = [];
+  questions.forEach((question) => {
+    if (question.task_id && !knownTaskIds.has(question.task_id) && !orphanTaskIds.includes(question.task_id)) {
+      orphanTaskIds.push(question.task_id);
+    }
+  });
+  const seenTaskIds = new Set();
+  tasks.forEach((task) => {
+    if (!task.id || seenTaskIds.has(task.id)) {
+      task.id = orphanTaskIds.find((id) => !seenTaskIds.has(id)) || crypto.randomUUID();
+      repaired = true;
+    }
+    seenTaskIds.add(task.id);
+  });
+  const seenQuestionIds = new Set();
+  questions.forEach((question) => {
+    if (!question.id || seenQuestionIds.has(question.id)) {
+      question.id = crypto.randomUUID();
+      repaired = true;
+    }
+    seenQuestionIds.add(question.id);
+  });
   return {
     classes: data.classes || [],
     class_students: classStudents,
-    tasks: data.tasks || [],
-    questions: data.questions || [],
+    tasks,
+    questions,
     student_attempts: data.student_attempts || [],
     student_answers: data.student_answers || [],
     student_task_scores: data.student_task_scores || [],
+    ...(repaired ? { __repaired: true } : {}),
   };
 }
 
@@ -512,13 +544,15 @@ const localApi = {
   },
   async saveTask(payload) {
     const data = loadLocalData();
+    const cleanPayload = Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== undefined));
     let taskId = payload.id;
-    if (payload.id) {
+    if (taskId) {
       const task = data.tasks.find((item) => item.id === payload.id);
-      Object.assign(task, Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== undefined)));
+      if (!task) throw new Error("没有找到要编辑的任务包。");
+      Object.assign(task, cleanPayload);
     } else {
       taskId = crypto.randomUUID();
-      data.tasks.push({ id: taskId, created_at: new Date().toISOString(), ...payload });
+      data.tasks.push({ ...cleanPayload, id: taskId, created_at: new Date().toISOString() });
     }
     saveLocalData(data);
     state.data = data;
@@ -562,11 +596,13 @@ const localApi = {
   },
   async saveQuestion(payload) {
     const data = loadLocalData();
+    const cleanPayload = Object.fromEntries(Object.entries(payload).filter(([, value]) => value !== undefined));
     if (payload.id) {
       const question = data.questions.find((item) => item.id === payload.id);
-      Object.assign(question, payload);
+      if (!question) throw new Error("没有找到要编辑的题目。");
+      Object.assign(question, cleanPayload);
     } else {
-      data.questions.push({ id: crypto.randomUUID(), ...payload });
+      data.questions.push({ ...cleanPayload, id: crypto.randomUUID() });
     }
     saveLocalData(data);
     state.data = data;
@@ -782,7 +818,7 @@ const supabaseApi = {
   async saveQuestion(payload) {
     const client = getSupabase();
     if (!client) return localApi.saveQuestion(payload);
-    const { template_id, optionsDraft, answerDraft, category, pairRows, answerRows, keywordRows, sentenceRows, manualSentenceRows, sentencePrompt, expressionPrompt, expressionAudio, ...cleanPayload } = payload;
+    const { optionsDraft, answerDraft, category, pairRows, answerRows, keywordRows, sentenceRows, manualSentenceRows, sentencePrompt, expressionPrompt, expressionAudio, ...cleanPayload } = payload;
     const { error } = await client.from("questions").upsert(cleanPayload).select().single();
     if (error) throw error;
     await api.loadAll();
@@ -1238,12 +1274,31 @@ function renderExpressionBuilder(activeTemplate, editing) {
   `;
 }
 
-function stableShuffle(items, seed) {
-  return [...items].sort((a, b) => {
-    const aKey = normalizeAnswer(`${seed}:${a}`).split("").reduce((sum, char) => sum + char.charCodeAt(0), 0);
-    const bKey = normalizeAnswer(`${seed}:${b}`).split("").reduce((sum, char) => sum + char.charCodeAt(0), 0);
-    return aKey - bKey;
+function stableHash(value) {
+  let hash = 2166136261;
+  String(value).split("").forEach((char) => {
+    hash ^= char.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
   });
+  return hash >>> 0;
+}
+
+function stableShuffle(items, seed, keyFn = (item) => item) {
+  const shuffled = [...items]
+    .map((item, index) => ({
+      item,
+      index,
+      key: stableHash(`${seed}:${index}:${normalizeAnswer(keyFn(item))}`),
+    }))
+    .sort((a, b) => (a.key - b.key) || (a.index - b.index))
+    .map(({ item }) => item);
+  if (
+    shuffled.length > 1 &&
+    shuffled.every((item, index) => item === items[index])
+  ) {
+    return [...shuffled.slice(1), shuffled[0]];
+  }
+  return shuffled;
 }
 
 function renderQuestionTemplatePicker(activeCategory, activeTemplate, categoryTemplates, { compact = false } = {}) {
@@ -1409,6 +1464,15 @@ function latestAttemptForStudent(attempts, studentName) {
   return attempts
     .filter((attempt) => normalizeAnswer(attempt.student_name) === normalizeAnswer(studentName))
     .sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0))[0] || null;
+}
+
+function latestAttemptsByStudent(attempts) {
+  const names = [...new Set(attempts.map((attempt) => attempt.student_name).filter(Boolean).map(normalizeAnswer))];
+  return names
+    .map((name) => attempts
+      .filter((attempt) => normalizeAnswer(attempt.student_name) === name)
+      .sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0))[0] || null)
+    .filter(Boolean);
 }
 
 function commonErrorTags(questionStats) {
@@ -1689,9 +1753,10 @@ function renderQuestion(question) {
     `;
   }
   if (question.type === "multiple_choice") {
+    const shuffledOptions = stableShuffle(question.options || [], `${question.id}:multiple-choice`);
     return `
       <div class="choice-list">
-        ${(question.options || []).map((option) => `
+        ${shuffledOptions.map((option) => `
           <button class="choice ${answer === option ? "selected" : ""}" data-action="set-answer" data-question="${question.id}" data-value="${escapeHtml(option)}" ${locked ? "disabled" : ""}>${escapeHtml(option)}</button>
         `).join("")}
       </div>
@@ -1699,9 +1764,10 @@ function renderQuestion(question) {
   }
   if (question.type === "multi_select") {
     const selected = Array.isArray(answer) ? answer : [];
+    const shuffledOptions = stableShuffle(question.options || [], `${question.id}:multi-select`);
     return `
       <div class="choice-list">
-        ${(question.options || []).map((option) => `
+        ${shuffledOptions.map((option) => `
           <button class="choice ${selected.includes(option) ? "selected" : ""}" data-action="toggle-multi-answer" data-question="${question.id}" data-value="${escapeHtml(option)}" ${locked ? "disabled" : ""}>${escapeHtml(option)}</button>
         `).join("")}
       </div>
@@ -1734,13 +1800,11 @@ function renderQuestion(question) {
     const chosenIndexes = new Set(chosen.map((item) => typeof item === "object" ? item.index : null));
     const promptText = typeof question.options === "object" && !Array.isArray(question.options) ? question.options.prompt || "" : "";
     const candidates = typeof question.options === "object" && !Array.isArray(question.options) ? question.options.candidates || [] : question.options || [];
-    const shuffledWords = candidates
-      .map((word, index) => ({ word, index }))
-      .sort((a, b) => {
-        const aKey = normalizeAnswer(`${question.id}:${a.word}:${a.index}`).split("").reduce((sum, char) => sum + char.charCodeAt(0), 0);
-        const bKey = normalizeAnswer(`${question.id}:${b.word}:${b.index}`).split("").reduce((sum, char) => sum + char.charCodeAt(0), 0);
-        return aKey - bKey;
-      });
+    const shuffledWords = stableShuffle(
+      candidates.map((word, index) => ({ word, index })),
+      `${question.id}:word-bank`,
+      (item) => `${item.word}:${item.index}`,
+    );
     return `
       ${promptText ? `<div class="notice">${escapeHtml(promptText)}</div>` : ""}
       <div class="word-bank">
@@ -1751,8 +1815,15 @@ function renderQuestion(question) {
           `;
         }).join("")}
       </div>
-      <div class="panel">
-        <strong>当前句子：</strong> ${chosen.map((item) => escapeHtml(typeof item === "object" ? item.word : item)).join(" ")}
+      <div class="sentence-answer-box">
+        <div class="sentence-answer-box__label">当前句子 / Current sentence</div>
+        <div class="sentence-answer-box__content">
+          ${chosen.length ? `
+            <div class="sentence-answer-words">
+              ${chosen.map((item) => `<span>${escapeHtml(typeof item === "object" ? item.word : item)}</span>`).join("")}
+            </div>
+          ` : `<span class="sentence-answer-placeholder">请选择词语组成句子</span>`}
+        </div>
       </div>
       ${locked ? "" : `<button class="secondary" data-action="clear-words" data-question="${question.id}">清空重排</button>`}
     `;
@@ -1761,7 +1832,11 @@ function renderQuestion(question) {
     const pairs = question.options || [];
     const current = answer || {};
     const rights = pairs.map((pair) => pair.right);
-    const rightEntries = rights.map((right, index) => ({ right, label: imageOptionLabel(right, index) }));
+    const rightEntries = stableShuffle(
+      rights.map((right, index) => ({ right, label: imageOptionLabel(right, index) })),
+      `${question.id}:matching-right`,
+      (item) => `${item.right}:${item.label}`,
+    );
     return `
       <div class="match-board">
         <div class="stack">
@@ -1780,12 +1855,15 @@ function renderQuestion(question) {
           `).join("")}
         </div>
         <div class="stack">
-          ${rightEntries.map(({ right, label }) => `
-            <div class="drag-chip ${isImageValue(right) ? "image" : ""} ${locked ? "disabled" : ""}" draggable="${locked ? "false" : "true"}" data-drag-value="${escapeHtml(right)}">
-              ${renderImageThumb(right, label)}
-              <span>${escapeHtml(label)}</span>
-            </div>
-          `).join("")}
+          ${rightEntries.map(({ right, label }) => {
+            const used = Object.values(current).some((value) => value === right);
+            return `
+              <div class="drag-chip ${isImageValue(right) ? "image" : ""} ${used || locked ? "disabled" : ""}" draggable="${used || locked ? "false" : "true"}" aria-disabled="${used || locked ? "true" : "false"}" data-drag-value="${escapeHtml(right)}">
+                ${renderImageThumb(right, label)}
+                <span>${escapeHtml(label)}</span>
+              </div>
+            `;
+          }).join("")}
         </div>
       </div>
     `;
@@ -1938,9 +2016,9 @@ function renderTaskEditor() {
         <h3>已保存题目 / Saved questions</h3>
         ${renderQuestionTable(questions, { pending: true })}
       `}
-      <div class="row wrap">
+      ${task ? "" : `<div class="row wrap">
         <button data-action="save-task">保存任务包</button>
-      </div>
+      </div>`}
     </section>
     ${task ? `
       <section class="panel stack">
@@ -1949,6 +2027,9 @@ function renderTaskEditor() {
         ${renderQuestionDraftForm(activeTemplate, questions)}
         <h3>已保存题目 / Saved questions</h3>
         ${renderQuestionTable(questions)}
+        <div class="row wrap">
+          <button data-action="save-task">保存任务包</button>
+        </div>
       </section>
     ` : ""}
   `;
@@ -1963,7 +2044,7 @@ function renderTeacherDashboard() {
       <aside class="panel stack">
         <button class="tab ${state.adminTab === "tasks" ? "active" : ""}" data-action="admin-tab" data-tab="tasks">任务包</button>
         <button class="tab ${state.adminTab === "classes" ? "active" : ""}" data-action="admin-tab" data-tab="classes">班级</button>
-        <button class="tab ${state.adminTab === "analytics" ? "active" : ""}" data-action="admin-tab" data-tab="analytics">基础数据</button>
+        <button class="tab ${state.adminTab === "analytics" ? "active" : ""}" data-action="admin-tab" data-tab="analytics">数据反馈</button>
         <button class="tab ${state.adminTab === "settings" ? "active" : ""}" data-action="admin-tab" data-tab="settings">系统设置</button>
         <button class="secondary" data-action="teacher-logout">退出登录</button>
       </aside>
@@ -2214,9 +2295,7 @@ function renderAnalytics() {
                   ${activeTask ? `
                     <div class="metric-row task-metrics">
                       ${(() => {
-                        const latestByStudent = activeClassStudents
-                          .map((student) => latestAttemptForStudent(taskAttempts, student.student_name))
-                          .filter(Boolean);
+                        const latestByStudent = latestAttemptsByStudent(taskAttempts);
                         const classAverageAccuracy = averageNumber(latestByStudent.map((attempt) => attempt.accuracy));
                         const classAverageDuration = averageNumber(latestByStudent.map((attempt) => attempt.duration_seconds || attempt.latest_duration_seconds).filter(Boolean));
                         const weakQuestionCount = questionStats.filter((item) => item.total && item.rate < 50).length;
@@ -2241,9 +2320,11 @@ function renderAnalytics() {
                         <thead><tr><th>学生</th><th>最近成绩</th><th>正确率</th><th>提交次数</th><th>答题用时</th><th>更新时间</th><th>查看详情</th></tr></thead>
                         <tbody>
                           ${(() => {
-                            const studentRows = activeClassStudents.map((student) => {
-                              const studentAttempts = taskAttempts.filter((attempt) => normalizeAnswer(attempt.student_name) === normalizeAnswer(student.student_name));
-                              const latestAttempt = latestAttemptForStudent(taskAttempts, student.student_name);
+                            const participantNames = [...new Set(taskAttempts.map((attempt) => attempt.student_name).filter(Boolean))];
+                            const studentRows = participantNames.map((studentName) => {
+                              const student = activeClassStudents.find((item) => normalizeAnswer(item.student_name) === normalizeAnswer(studentName)) || { student_name: studentName };
+                              const studentAttempts = taskAttempts.filter((attempt) => normalizeAnswer(attempt.student_name) === normalizeAnswer(studentName));
+                              const latestAttempt = latestAttemptForStudent(taskAttempts, studentName);
                               return { student, studentAttempts, latestAttempt };
                             }).sort((a, b) => {
                               if (state.analyticsStudentSort === "accuracy") {
@@ -2269,7 +2350,7 @@ function renderAnalytics() {
                                 <td><button class="secondary compact" data-action="select-analytics-student" data-student="${escapeHtml(student.student_name)}">${isSelectedStudent ? "收起 / Hide" : "查看 / View"}</button></td>
                               </tr>
                             `;
-                            }).join("") : `<tr><td colspan="7">这个班级还没有授权学生。</td></tr>`;
+                            }).join("") : `<tr><td colspan="7">当前任务还没有学生提交。</td></tr>`;
                           })()}
                         </tbody>
                       </table>
@@ -3069,6 +3150,8 @@ function bindEvents() {
         });
       }
       if (action === "save-task") {
+        const wasNewTask = !state.editingTaskId;
+        const pendingQuestions = state.pendingQuestions.map((question) => ({ ...question }));
         const taskPayload = {
           id: state.editingTaskId || undefined,
           title: document.querySelector("#task-title").value.trim(),
@@ -3083,8 +3166,8 @@ function bindEvents() {
           if (!taskPayload.title) throw new Error("请填写任务标题。");
           if (!taskPayload.class_id) throw new Error("请先在班级页创建一个班级，用于兼容本地数据结构。");
           const taskId = await api.saveTask(taskPayload);
-          if (!state.editingTaskId && state.pendingQuestions.length) {
-            for (const [index, question] of state.pendingQuestions.entries()) {
+          if (wasNewTask && pendingQuestions.length) {
+            for (const [index, question] of pendingQuestions.entries()) {
               await api.saveQuestion({
                 ...question,
                 id: undefined,
@@ -3093,7 +3176,8 @@ function bindEvents() {
               });
             }
           }
-          state.editingTaskId = null;
+          await api.loadAll();
+          state.editingTaskId = taskId;
           state.editingQuestion = null;
           state.pendingQuestions = [];
           state.adminTab = "tasks";
@@ -3254,6 +3338,10 @@ function bindEvents() {
 
   document.querySelectorAll("[data-drag-value]").forEach((chip) => {
     chip.addEventListener("dragstart", (event) => {
+      if (chip.classList.contains("disabled") || chip.getAttribute("aria-disabled") === "true") {
+        event.preventDefault();
+        return;
+      }
       event.dataTransfer.setData("text/plain", chip.dataset.dragValue);
     });
   });
