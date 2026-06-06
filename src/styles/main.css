@@ -338,7 +338,7 @@ label {
 table {
   width: 100%;
   border-collapse: collapse;
-  min-width: 720px;
+  min-width: 820px;
   background: #fff;
 }
 
@@ -353,6 +353,21 @@ td {
 th {
   background: var(--wash);
   font-size: 13px;
+}
+
+.task-actions {
+  display: inline-grid;
+  grid-template-columns: repeat(3, max-content);
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.task-actions button.compact {
+  min-width: 48px;
+  min-height: 30px;
+  padding: 4px 9px;
 }
 
 .pill {

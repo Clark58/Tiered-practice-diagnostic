@@ -1991,7 +1991,7 @@ function renderTeacherDashboard() {
                       <td>${escapeHtml(task.topic || "暂无")}</td>
                       <td>${escapeHtml(task.description || "暂无")}</td>
                       <td>${getQuestions(task.id).length}</td>
-                      <td class="row wrap">
+                      <td class="task-actions">
                         <button class="secondary compact" data-action="edit-task" data-task="${task.id}">编辑</button>
                         <button class="${task.status === "published" ? "secondary" : ""} compact" data-action="toggle-task-status" data-task="${task.id}">
                           ${task.status === "published" ? "取消发布" : "发布"}
