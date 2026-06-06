@@ -65,6 +65,18 @@ button.warning {
   background: var(--red);
 }
 
+button.danger-button {
+  color: var(--red);
+  border-color: rgba(180, 35, 24, 0.28);
+  background: #fff6f5;
+}
+
+button.danger-button:hover {
+  color: #fff;
+  border-color: var(--red);
+  background: var(--red);
+}
+
 button.compact {
   min-height: 32px;
   padding: 5px 10px;

@@ -524,6 +524,19 @@ const localApi = {
     state.data = data;
     return taskId;
   },
+  async deleteTask(taskId) {
+    const data = loadLocalData();
+    const removedAttemptIds = new Set(data.student_attempts
+      .filter((attempt) => attempt.task_id === taskId)
+      .map((attempt) => attempt.id));
+    data.tasks = data.tasks.filter((item) => item.id !== taskId);
+    data.questions = data.questions.filter((item) => item.task_id !== taskId);
+    data.student_attempts = data.student_attempts.filter((attempt) => attempt.task_id !== taskId);
+    data.student_answers = data.student_answers.filter((answer) => !removedAttemptIds.has(answer.attempt_id));
+    data.student_task_scores = data.student_task_scores.filter((score) => score.task_id !== taskId);
+    saveLocalData(data);
+    state.data = data;
+  },
   async deleteQuestion(questionId) {
     const data = loadLocalData();
     data.questions = data.questions.filter((item) => item.id !== questionId);
@@ -734,6 +747,13 @@ const supabaseApi = {
     if (error) throw error;
     await api.loadAll();
     return data?.id || payload.id;
+  },
+  async deleteTask(taskId) {
+    const client = getSupabase();
+    if (!client) return localApi.deleteTask(taskId);
+    const { error } = await client.from("tasks").delete().eq("id", taskId);
+    if (error) throw error;
+    await api.loadAll();
   },
   async deleteQuestion(questionId) {
     const client = getSupabase();
@@ -1976,6 +1996,7 @@ function renderTeacherDashboard() {
                         <button class="${task.status === "published" ? "secondary" : ""} compact" data-action="toggle-task-status" data-task="${task.id}">
                           ${task.status === "published" ? "取消发布" : "发布"}
                         </button>
+                        <button class="secondary compact danger-button" data-action="delete-task" data-task="${task.id}" data-title="${escapeHtml(task.title)}">删除</button>
                       </td>
                     </tr>
                   `).join("") : `<tr><td colspan="5">当前学习路径还没有任务包。</td></tr>`}
@@ -3087,6 +3108,20 @@ function bindEvents() {
             id: task.id,
             status: task.status === "published" ? "draft" : "published",
           });
+          state.adminTab = "tasks";
+          state.view = "teacher-dashboard";
+        });
+      }
+      if (action === "delete-task") {
+        const task = getTask(element.dataset.task);
+        const title = task?.title || element.dataset.title || "这个任务包";
+        if (!confirm(`是否要删除任务包「${title}」？删除后该任务下的题目、提交记录和成绩都会删除，且不可恢复。`)) return;
+        await run(async () => {
+          await api.deleteTask(element.dataset.task);
+          if (state.editingTaskId === element.dataset.task) state.editingTaskId = null;
+          if (state.analyticsTaskId === element.dataset.task) state.analyticsTaskId = "";
+          state.editingQuestion = null;
+          state.pendingQuestions = [];
           state.adminTab = "tasks";
           state.view = "teacher-dashboard";
         });
