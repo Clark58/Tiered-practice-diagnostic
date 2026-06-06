@@ -30,8 +30,10 @@ The app is a static MVP for a Chinese teacher:
 - Local preview: `http://127.0.0.1:4174/`
 - GitHub remote: `git@github.com:Clark58/Tiered-practice-diagnostic.git`
 - Expected GitHub Pages preview: `https://clark58.github.io/Tiered-practice-diagnostic/`
+- Vercel preview: `https://chinese-tiered-diagnostic.vercel.app/`
 
 If GitHub Pages is 404, check `.github/workflows/pages.yml` and repository Pages settings.
+If Vercel returns 404, check `vercel.json`; the app must deploy from generated `dist/`, not from `server.mjs`.
 
 ## Key Product Decisions
 

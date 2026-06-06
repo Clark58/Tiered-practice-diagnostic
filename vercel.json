@@ -1,0 +1,12 @@
+{
+  "framework": null,
+  "installCommand": null,
+  "buildCommand": "mkdir -p dist && cp index.html dist/ && cp -R src public supabase dist/",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/index.html"
+    }
+  ]
+}

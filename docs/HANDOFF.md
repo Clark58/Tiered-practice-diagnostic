@@ -12,6 +12,7 @@
 - 本地目录：`/Users/clark/Library/Mobile Documents/com~apple~CloudDocs/CodexSync/中文分层学习与诊断`
 - 本地预览：`http://127.0.0.1:4174/`
 - GitHub Pages 预期地址：`https://clark58.github.io/Tiered-practice-diagnostic/`
+- Vercel 预览地址：`https://chinese-tiered-diagnostic.vercel.app/`
 
 ## 运行与检查
 
@@ -70,6 +71,8 @@ GitHub Pages 工作流文件是 `.github/workflows/pages.yml`，会在推送 `ma
 - `supabase/`
 
 如果 Pages 地址返回 404，先检查 GitHub 仓库 Settings -> Pages 是否允许 GitHub Actions 部署，或查看 Actions 的 `Deploy GitHub Pages` 工作流是否成功。
+
+Vercel 手动部署已链接到项目 `chinese-tiered-diagnostic`。`vercel.json` 明确把静态文件复制到 `dist/`，避免 Vercel 把 `server.mjs` 当成生产入口。
 
 ## Git 规则
 
