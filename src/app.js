@@ -205,10 +205,12 @@ const state = {
   adminTaskLevel: "level1",
   adminClassId: "",
   analyticsClassId: "",
+  analyticsGroupId: "",
   analyticsTaskId: "",
   analyticsStudentName: "",
   analyticsStudentSort: "name",
   editingTaskId: null,
+  taskDraft: null,
   editingQuestion: null,
   pendingQuestions: [],
   data: null,
@@ -258,7 +260,72 @@ function defaultPreviewStudent() {
     class_name: classRow.name,
     student_name: studentRow.student_name,
     gender: studentRow.gender || "",
-    access_code: studentRow.access_code || `${classRow.class_code}-${studentRow.student_name}`,
+    access_code: studentAccessCode(studentRow, classRow.class_code),
+  };
+}
+
+function previewStudentForLevel(levelId) {
+  const data = loadLocalData();
+  const previewByLevel = {
+    level1: { codePrefix: "G5", classCode: "G5LOCAL", className: "G5 Chinese Preview", studentName: "G5 Preview" },
+    level2: { codePrefix: "G6", classCode: "G6LOCAL", className: "G6 Chinese Preview", studentName: "G6 Preview" },
+    level3: { codePrefix: "G7", classCode: "G7LOCAL", className: "G7/8 Chinese Preview", studentName: "G7 Preview" },
+  };
+  const fallback = previewByLevel[levelId] || previewByLevel.level1;
+  const classRow = data.classes.find((item) => classGroupKey(item.class_code) === fallback.codePrefix);
+  const studentRow = data.class_students.find((item) => item.class_id === classRow?.id && item.active !== false);
+  if (classRow && studentRow) {
+    return {
+      student_id: studentRow.id,
+      class_id: classRow.id,
+      class_code: classRow.class_code,
+      class_name: classRow.name,
+      student_name: studentRow.student_name,
+      gender: studentRow.gender || "",
+      access_code: studentAccessCode(studentRow, classRow.class_code),
+    };
+  }
+  return {
+    student_id: `${levelId}-preview-student`,
+    class_id: `${levelId}-preview-class`,
+    class_code: fallback.classCode,
+    class_name: fallback.className,
+    student_name: fallback.studentName,
+    gender: "",
+    access_code: buildAccessCode(fallback.classCode, fallback.studentName),
+  };
+}
+
+function loadLocalPreviewLevel(levelId) {
+  const data = loadLocalData();
+  const previewStudent = previewStudentForLevel(levelId);
+  const tasks = sortTasksByTitle(data.tasks.filter((task) => task.level === levelId && task.status === "published"));
+  const taskIds = new Set(tasks.map((task) => task.id));
+  state.student = previewStudent;
+  state.level = levelId;
+  state.data = {
+    classes: [{
+      id: previewStudent.class_id,
+      class_code: previewStudent.class_code,
+      name: previewStudent.class_name,
+    }],
+    class_students: [{
+      id: previewStudent.student_id,
+      class_id: previewStudent.class_id,
+      student_name: previewStudent.student_name,
+      gender: previewStudent.gender || "",
+      access_code: studentAccessCode(previewStudent, previewStudent.class_code),
+      active: true,
+    }],
+    tasks,
+    questions: data.questions.filter((question) => taskIds.has(question.task_id)),
+    student_attempts: [],
+    student_answers: [],
+    student_task_scores: data.student_task_scores.filter((score) => (
+      taskIds.has(score.task_id) &&
+      normalizeAnswer(score.class_code) === normalizeAnswer(previewStudent.class_code) &&
+      normalizeAnswer(score.student_name) === normalizeAnswer(previewStudent.student_name)
+    )),
   };
 }
 
@@ -269,8 +336,8 @@ function seedData() {
       { id: "demo-class-2", class_code: "G8CN", name: "Grade 8 Chinese" },
     ],
     class_students: [
-      { id: "demo-student-1", class_id: "demo-class-1", student_name: "Kevin", gender: "Male", access_code: "G7CN-Kevin", active: true },
-      { id: "demo-student-2", class_id: "demo-class-1", student_name: "王明", gender: "男", access_code: "G7CN-王明", active: true },
+      { id: "demo-student-1", class_id: "demo-class-1", student_name: "Kevin", gender: "Male", access_code: "G7CNKevin", active: true },
+      { id: "demo-student-2", class_id: "demo-class-1", student_name: "王明", gender: "男", access_code: "G7CN王明", active: true },
     ],
     tasks: [
       {
@@ -387,8 +454,8 @@ function normalizeData(data) {
   let repaired = false;
   if (!classStudents.length && (data.classes || []).some((item) => item.id === "demo-class-1")) {
     classStudents.push(
-      { id: "demo-student-1", class_id: "demo-class-1", student_name: "Kevin", gender: "Male", access_code: "G7CN-Kevin", active: true },
-      { id: "demo-student-2", class_id: "demo-class-1", student_name: "王明", gender: "男", access_code: "G7CN-王明", active: true },
+      { id: "demo-student-1", class_id: "demo-class-1", student_name: "Kevin", gender: "Male", access_code: "G7CNKevin", active: true },
+      { id: "demo-student-2", class_id: "demo-class-1", student_name: "王明", gender: "男", access_code: "G7CN王明", active: true },
     );
   }
   const knownTaskIds = new Set(tasks.map((task) => task.id).filter(Boolean));
@@ -435,11 +502,18 @@ const localApi = {
     const data = loadLocalData();
     const loginCode = String(classCode || "").trim();
     if (!loginCode) throw new Error("请输入组合代码。");
-    let studentRow = data.class_students.find((item) => (
+    const parsedCode = parseAccessCode(loginCode, data.classes);
+    let classRow = parsedCode.classRow || data.classes.find((item) => (
+      normalizeAnswer(item.class_code) === normalizeAnswer(parsedCode.classCode)
+    )) || null;
+    let studentRow = classRow ? data.class_students.find((item) => (
+      item.class_id === classRow.id &&
       item.active !== false &&
-      normalizeAnswer(item.access_code) === normalizeAnswer(loginCode)
-    ));
-    let classRow = studentRow ? data.classes.find((item) => item.id === studentRow.class_id) : null;
+      (
+        accessCodeMatches(loginCode, item, classRow.class_code) ||
+        normalizeAnswer(item.student_name) === normalizeAnswer(parsedCode.studentName)
+      )
+    )) : null;
     if (!studentRow && studentName) {
       classRow = data.classes.find((item) => item.class_code.toLowerCase() === loginCode.toLowerCase());
       studentRow = data.class_students.find((item) => (
@@ -456,7 +530,7 @@ const localApi = {
       class_name: classRow.name,
       student_name: studentRow.student_name,
       gender: studentRow.gender || "",
-      access_code: studentRow.access_code || loginCode,
+      access_code: studentAccessCode(studentRow, classRow.class_code),
     };
     state.data = { ...data, classes: [classRow], class_students: [studentRow] };
     return state.student;
@@ -524,15 +598,20 @@ const localApi = {
   },
   async saveStudent(payload) {
     const data = loadLocalData();
+    const classRow = data.classes.find((item) => item.id === payload.class_id);
+    const cleanPayload = {
+      ...payload,
+      access_code: compactAccessCode(payload.access_code || buildAccessCode(classRow?.class_code, payload.student_name)),
+    };
     const existing = data.class_students.find((item) => (
-      item.class_id === payload.class_id &&
+      item.class_id === cleanPayload.class_id &&
       (
-        normalizeAnswer(item.access_code) === normalizeAnswer(payload.access_code) ||
-        normalizeAnswer(item.student_name) === normalizeAnswer(payload.student_name)
+        accessCodeMatches(cleanPayload.access_code, item, classRow?.class_code || "") ||
+        normalizeAnswer(item.student_name) === normalizeAnswer(cleanPayload.student_name)
       )
     ));
-    if (existing) Object.assign(existing, payload, { active: true });
-    else data.class_students.push({ id: crypto.randomUUID(), active: true, ...payload });
+    if (existing) Object.assign(existing, cleanPayload, { active: true });
+    else data.class_students.push({ id: crypto.randomUUID(), active: true, ...cleanPayload });
     saveLocalData(data);
     state.data = data;
   },
@@ -640,6 +719,12 @@ const localApi = {
     state.data = data;
     return attemptId;
   },
+  async reviewAnswer(answerId, isCorrect) {
+    const data = loadLocalData();
+    recalculateReviewedAnswer(data, answerId, isCorrect);
+    saveLocalData(data);
+    state.data = data;
+  },
 };
 
 const supabaseApi = {
@@ -686,7 +771,11 @@ const supabaseApi = {
   async validateStudent(classCode, studentName) {
     const client = getSupabase();
     if (!client) return localApi.validateStudent(classCode, studentName);
-    const { data, error } = await client.rpc("get_student_class", { p_class_code: classCode, p_student_name: studentName });
+    const parsedCode = studentName ? { classCode, studentName } : parseAccessCode(classCode, state.data?.classes || []);
+    const { data, error } = await client.rpc("get_student_class", {
+      p_class_code: parsedCode.classCode,
+      p_student_name: parsedCode.studentName,
+    });
     if (error) throw error;
     const classRow = Array.isArray(data) ? data[0] : data;
     if (!classRow) throw new Error("没有找到这个班级 code，请检查后再试。");
@@ -697,9 +786,9 @@ const supabaseApi = {
       class_name: classRow.name,
       student_name: classRow.student_name,
       gender: classRow.gender || "",
-      access_code: classRow.access_code || classCode,
+      access_code: studentAccessCode(classRow, classRow.class_code),
     };
-    state.data = { classes: [classRow], class_students: [{ id: classRow.student_id, class_id: classRow.id, student_name: classRow.student_name, gender: classRow.gender || "", access_code: classRow.access_code || "", active: true }], tasks: [], questions: [], student_attempts: [], student_answers: [], student_task_scores: [] };
+    state.data = { classes: [classRow], class_students: [{ id: classRow.student_id, class_id: classRow.id, student_name: classRow.student_name, gender: classRow.gender || "", access_code: studentAccessCode(classRow, classRow.class_code), active: true }], tasks: [], questions: [], student_attempts: [], student_answers: [], student_task_scores: [] };
     return state.student;
   },
   async loadStudentLevel(classCode, studentName, level) {
@@ -845,6 +934,29 @@ const supabaseApi = {
     if (scoreResult.error) throw scoreResult.error;
     return attemptId;
   },
+  async reviewAnswer(answerId, isCorrect) {
+    const client = getSupabase();
+    if (!client) return localApi.reviewAnswer(answerId, isCorrect);
+    const data = structuredClone(state.data || { student_attempts: [], student_answers: [], student_task_scores: [] });
+    const review = recalculateReviewedAnswer(data, answerId, isCorrect);
+    const answerResult = await client
+      .from("student_answers")
+      .update({ is_correct: review.answer.is_correct, score: review.answer.score })
+      .eq("id", answerId);
+    if (answerResult.error) throw answerResult.error;
+    const attemptResult = await client
+      .from("student_attempts")
+      .update({
+        score: review.attempt.score,
+        max_score: review.attempt.max_score,
+        accuracy: review.attempt.accuracy,
+      })
+      .eq("id", review.attempt.id);
+    if (attemptResult.error) throw attemptResult.error;
+    const scoreResult = await client.from("student_task_scores").upsert(review.scorePayload);
+    if (scoreResult.error) throw scoreResult.error;
+    await api.loadAll();
+  },
 };
 
 const api = supabaseApi;
@@ -898,10 +1010,69 @@ function renderAudioPlayer(value, label = "录音") {
   `;
 }
 
+function answerAudioValue(value) {
+  if (value && typeof value === "object" && isAudioValue(value.audio)) return value.audio;
+  if (isAudioValue(value)) return value;
+  return "";
+}
+
+function renderTeacherAnswerValue(answer) {
+  const audio = answerAudioValue(answer);
+  if (audio) return renderAudioPlayer(audio, "学生录音");
+  return escapeHtml(formatAnswerForStudent(answer));
+}
+
+function renderTeacherReviewControls(row) {
+  if (!row) return "未作答";
+  const current = row.is_correct === true ? "当前：做对" : row.is_correct === false ? "当前：做错" : "当前：未复判";
+  return `
+    <div class="teacher-review-controls">
+      <span>${escapeHtml(current)}</span>
+      <button class="secondary compact ${row.is_correct === true ? "active" : ""}" data-action="review-answer" data-answer="${escapeHtml(row.id)}" data-correct="true">判对</button>
+      <button class="secondary compact ${row.is_correct === false ? "active warning-text" : ""}" data-action="review-answer" data-answer="${escapeHtml(row.id)}" data-correct="false">判错</button>
+    </div>
+  `;
+}
+
 function normalizeAnswer(value) {
   if (Array.isArray(value)) return value.map((item) => normalizeAnswer(typeof item === "object" ? item.word : item)).join(" ");
   if (value && typeof value === "object" && "word" in value) return normalizeAnswer(value.word);
   return String(value ?? "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function buildAccessCode(classCode, studentName) {
+  return `${String(classCode || "").trim().toUpperCase()}${String(studentName || "").trim()}`;
+}
+
+function compactAccessCode(value) {
+  return String(value || "").trim().replace(/-/g, "").replace(/\s+/g, "");
+}
+
+function parseAccessCode(loginCode, classes = []) {
+  const raw = String(loginCode || "").trim();
+  const compact = compactAccessCode(raw).toUpperCase();
+  const classRows = [...classes]
+    .filter((item) => item?.class_code)
+    .sort((a, b) => String(b.class_code).length - String(a.class_code).length);
+  const classRow = classRows.find((item) => compact.startsWith(compactAccessCode(item.class_code).toUpperCase()));
+  if (classRow) {
+    const classCode = String(classRow.class_code).trim();
+    const nameStart = String(classRow.class_code).length;
+    const studentName = compactAccessCode(raw).slice(nameStart).trim();
+    return { classCode, studentName, classRow };
+  }
+  const fallback = raw.match(/^([A-Za-z]\d[A-Za-z]+)-?(.+)$/);
+  return fallback ? { classCode: fallback[1].toUpperCase(), studentName: fallback[2].trim(), classRow: null } : { classCode: raw, studentName: "", classRow: null };
+}
+
+function studentAccessCode(student, classCode) {
+  return buildAccessCode(classCode, student?.student_name || "");
+}
+
+function accessCodeMatches(input, student, classCode) {
+  const compactInput = compactAccessCode(input).toLowerCase();
+  return compactInput === compactAccessCode(student?.access_code).toLowerCase()
+    || compactInput === compactAccessCode(studentAccessCode(student, classCode)).toLowerCase();
 }
 
 function isOpenQuestion(question) {
@@ -933,6 +1104,41 @@ function getLevel(levelId) {
   return LEVELS.find((level) => level.id === levelId) || LEVELS[0];
 }
 
+function levelForClassCode(classCode = "") {
+  const match = String(classCode).trim().toUpperCase().match(/^G(\d+)/);
+  const grade = match ? Number(match[1]) : 5;
+  if (grade >= 7) return "level3";
+  if (grade === 6) return "level2";
+  return "level1";
+}
+
+function classGroupKey(classCode = "") {
+  const clean = String(classCode || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+  return clean.slice(0, 2) || "NA";
+}
+
+function classGroupTitle(groupKey) {
+  return groupKey === "NA" ? "Unassigned Chinese Class" : `${groupKey} Chinese Class`;
+}
+
+function groupedClassesByCode(classes) {
+  const groups = new Map();
+  classes.forEach((classRow) => {
+    const key = classGroupKey(classRow.class_code);
+    if (!groups.has(key)) groups.set(key, { id: key, title: classGroupTitle(key), classes: [] });
+    groups.get(key).classes.push(classRow);
+  });
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      classes: group.classes.sort((a, b) => String(a.class_code || "").localeCompare(String(b.class_code || ""), "en", {
+        numeric: true,
+        sensitivity: "base",
+      })),
+    }))
+    .sort((a, b) => a.id.localeCompare(b.id, "en", { numeric: true, sensitivity: "base" }));
+}
+
 function getQuestionTypeLabel(type, templateId = "") {
   return getTemplate(templateId)?.label || QUESTION_TYPES.find(([id]) => id === type)?.[1] || type;
 }
@@ -953,6 +1159,35 @@ function categoryForQuestionType(typeOrTemplateId) {
 function templateForQuestion(typeOrTemplateId, categoryId) {
   const templates = getTemplatesForCategory(categoryId);
   return templates.find((template) => template.id === typeOrTemplateId || template.type === typeOrTemplateId) || templates[0] || QUESTION_TEMPLATES[0];
+}
+
+function nextQuestionSortOrder() {
+  const questions = state.editingTaskId ? getQuestions(state.editingTaskId) : state.pendingQuestions;
+  const maxSort = questions.reduce((max, question) => Math.max(max, Number(question.sort_order) || 0), 0);
+  return maxSort + 1;
+}
+
+function blankQuestionDraftForTemplate(templateId, { sortOrder } = {}) {
+  const template = getTemplate(templateId) || QUESTION_TEMPLATES[0];
+  return {
+    type: template.type,
+    template_id: template.id,
+    category: template.category,
+    prompt: template.defaultPrompt || "",
+    sort_order: sortOrder || nextQuestionSortOrder(),
+    skill_tag: "",
+    grammar_tag: "",
+    optionsDraft: "",
+    answerDraft: "",
+    pairRows: null,
+    answerRows: null,
+    keywordRows: null,
+    sentenceRows: null,
+    manualSentenceRows: false,
+    sentencePrompt: "",
+    expressionPrompt: "",
+    expressionAudio: "",
+  };
 }
 
 function isPairBuilderTemplate(templateId) {
@@ -1460,6 +1695,54 @@ function averageNumber(values) {
   return Math.round(clean.reduce((sum, value) => sum + value, 0) / clean.length);
 }
 
+function recalculateReviewedAnswer(data, answerId, isCorrect) {
+  const answer = data.student_answers.find((item) => item.id === answerId);
+  if (!answer) throw new Error("没有找到这条学生答案。");
+  const attempt = data.student_attempts.find((item) => item.id === answer.attempt_id);
+  if (!attempt) throw new Error("没有找到这次提交记录。");
+  answer.is_correct = Boolean(isCorrect);
+  answer.score = answer.is_correct ? 1 : 0;
+
+  const attemptAnswers = data.student_answers.filter((item) => item.attempt_id === attempt.id);
+  const scoredAnswers = attemptAnswers.filter((item) => item.is_correct !== null && item.is_correct !== undefined);
+  const score = scoredAnswers.reduce((sum, item) => sum + Number(item.score || 0), 0);
+  const maxScore = scoredAnswers.length;
+  attempt.score = score;
+  attempt.max_score = maxScore;
+  attempt.accuracy = maxScore ? Math.round((score / maxScore) * 100) : 0;
+
+  const sameAttempts = data.student_attempts
+    .filter((item) => (
+      item.task_id === attempt.task_id &&
+      normalizeAnswer(item.class_code) === normalizeAnswer(attempt.class_code) &&
+      normalizeAnswer(item.student_name) === normalizeAnswer(attempt.student_name)
+    ))
+    .sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0));
+  const latestAttempt = sameAttempts[0] || attempt;
+  const scoreRow = data.student_task_scores.find((item) => (
+    item.task_id === attempt.task_id &&
+    normalizeAnswer(item.class_code) === normalizeAnswer(attempt.class_code) &&
+    normalizeAnswer(item.student_name) === normalizeAnswer(attempt.student_name)
+  ));
+  const scorePayload = {
+    id: scoreRow?.id || crypto.randomUUID(),
+    task_id: attempt.task_id,
+    class_code: attempt.class_code,
+    student_name: attempt.student_name,
+    level: attempt.level,
+    latest_score: latestAttempt.score,
+    latest_max_score: latestAttempt.max_score,
+    latest_accuracy: latestAttempt.accuracy,
+    latest_duration_seconds: latestAttempt.duration_seconds || latestAttempt.latest_duration_seconds || null,
+    best_score: sameAttempts.reduce((best, item) => Math.max(best, Number(item.score || 0)), 0),
+    attempts_count: sameAttempts.length,
+    updated_at: new Date().toISOString(),
+  };
+  if (scoreRow) Object.assign(scoreRow, scorePayload);
+  else data.student_task_scores.push(scorePayload);
+  return { answer, attempt, scorePayload };
+}
+
 function latestAttemptForStudent(attempts, studentName) {
   return attempts
     .filter((attempt) => normalizeAnswer(attempt.student_name) === normalizeAnswer(studentName))
@@ -1473,6 +1756,34 @@ function latestAttemptsByStudent(attempts) {
       .filter((attempt) => normalizeAnswer(attempt.student_name) === name)
       .sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0))[0] || null)
     .filter(Boolean);
+}
+
+function latestPublishedTaskForLevel(tasks, levelId) {
+  return tasks
+    .filter((task) => task.status === "published" && task.level === levelId)
+    .sort((a, b) => {
+      const dateDiff = new Date(b.created_at || 0) - new Date(a.created_at || 0);
+      if (dateDiff) return dateDiff;
+      return String(b.title || "").localeCompare(String(a.title || ""), "en", { numeric: true, sensitivity: "base" });
+    })[0] || null;
+}
+
+function latestPublishedTaskIdForLevel(tasks, levelId) {
+  return latestPublishedTaskForLevel(tasks, levelId)?.id || "";
+}
+
+function averageAccuracyForTask(attempts, taskId, classCodes) {
+  const codeSet = new Set(classCodes.map((code) => normalizeAnswer(code)).filter(Boolean));
+  const rows = attempts.filter((attempt) => (
+    attempt.task_id === taskId &&
+    codeSet.has(normalizeAnswer(attempt.class_code))
+  ));
+  const latest = latestAttemptsByStudent(rows);
+  return averageNumber(latest.map((attempt) => attempt.accuracy));
+}
+
+function formatAccuracy(value) {
+  return value === null || value === undefined ? "暂无" : `${value}%`;
 }
 
 function commonErrorTags(questionStats) {
@@ -1494,6 +1805,103 @@ function commonErrorTags(questionStats) {
       return tags.length ? `${tags.join(" / ")}（错${item.wrong}）` : "";
     })
     .filter(Boolean);
+}
+
+function analyticsForClassTask(task, classRow, attempts, answers, questions) {
+  if (!task || !classRow) return null;
+  const taskAttempts = attempts.filter((attempt) => (
+    attempt.task_id === task.id &&
+    normalizeAnswer(attempt.class_code) === normalizeAnswer(classRow.class_code)
+  ));
+  const taskAttemptIds = new Set(taskAttempts.map((attempt) => attempt.id));
+  const taskAnswers = answers.filter((answer) => taskAttemptIds.has(answer.attempt_id));
+  const taskQuestions = questions.filter((question) => question.task_id === task.id);
+  const questionStats = taskQuestions.map((question) => {
+    const rows = taskAnswers.filter((answer) => answer.question_id === question.id && answer.is_correct !== null);
+    const correct = rows.filter((answer) => answer.is_correct).length;
+    return {
+      question,
+      total: rows.length,
+      correct,
+      rate: rows.length ? Math.round((correct / rows.length) * 100) : 0,
+    };
+  });
+  const latestByStudent = latestAttemptsByStudent(taskAttempts);
+  return {
+    task,
+    taskAttempts,
+    taskAnswers,
+    taskQuestions,
+    questionStats,
+    latestByStudent,
+    averageAccuracy: averageNumber(latestByStudent.map((attempt) => attempt.accuracy)),
+  };
+}
+
+function classStatusSummary(averageAccuracy, latestByStudent) {
+  if (averageAccuracy === null || averageAccuracy === undefined) {
+    return { label: "暂无数据", text: "最新任务还没有提交记录。" };
+  }
+  const rates = latestByStudent.map((attempt) => Number(attempt.accuracy)).filter((rate) => Number.isFinite(rate));
+  const spread = rates.length ? Math.max(...rates) - Math.min(...rates) : 0;
+  if (averageAccuracy > 85 && spread <= 20) {
+    return { label: "整体稳定", text: `整体准确率 ${averageAccuracy}%，学生成绩差异不大。` };
+  }
+  if (averageAccuracy > 85) {
+    return { label: "整体不错", text: `整体准确率 ${averageAccuracy}%，但学生个体差异较大。` };
+  }
+  if (averageAccuracy >= 65) {
+    return { label: "需要复习", text: `整体准确率 ${averageAccuracy}%，学生个体差异一般。` };
+  }
+  return { label: "重点关注", text: `整体准确率 ${averageAccuracy}%，学生个体差异较大。` };
+}
+
+function truncateText(value, max = 30) {
+  const text = String(value || "").trim();
+  return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function renderAnalyticsSummary(summary) {
+  if (!summary) {
+    return `<div class="analytics-summary notice">暂无可分析的最新任务。</div>`;
+  }
+  const weakQuestions = summary.questionStats
+    .filter((item) => item.total > 0)
+    .sort((a, b) => (a.rate - b.rate) || (b.total - a.total))
+    .slice(0, 3);
+  const weakStudents = summary.latestByStudent
+    .slice()
+    .sort((a, b) => Number(a.accuracy || 0) - Number(b.accuracy || 0))
+    .slice(0, 3);
+  const tags = commonErrorTags(summary.questionStats);
+  const status = classStatusSummary(summary.averageAccuracy, summary.latestByStudent);
+  return `
+    <section class="analytics-summary">
+      <div class="analytics-summary__head">
+        <span class="pill">最新任务摘要</span>
+        <strong>${escapeHtml(summary.task.title || "未命名任务")}</strong>
+      </div>
+      <div class="analytics-summary__grid">
+        <div class="summary-card">
+          <span>最需要关注的题目</span>
+          <strong>${weakQuestions.length ? weakQuestions.map((item) => `${escapeHtml(truncateText(item.question.prompt))}（${item.rate}%）`).join("<br>") : "暂无错题数据"}</strong>
+        </div>
+        <div class="summary-card">
+          <span>最需要关注的学生</span>
+          <strong>${weakStudents.length ? weakStudents.map((attempt) => `${escapeHtml(attempt.student_name)}（${escapeHtml(attempt.accuracy)}%）`).join("<br>") : "暂无提交"}</strong>
+        </div>
+        <div class="summary-card">
+          <span>建议复习标签</span>
+          <strong>${tags.length ? tags.map((tag) => `<em>${escapeHtml(tag)}</em>`).join("") : "暂无"}</strong>
+        </div>
+        <div class="summary-card status-card">
+          <span>本班状态</span>
+          <strong>${escapeHtml(status.label)}</strong>
+          <small>${escapeHtml(status.text)}</small>
+        </div>
+      </div>
+    </section>
+  `;
 }
 
 const PINYIN_MAP = {
@@ -1573,6 +1981,32 @@ function go(view, extra = {}) {
   render();
 }
 
+function taskDraftFromTask(task = null) {
+  return {
+    title: task?.title || "",
+    topic: task?.topic || "",
+    description: task?.description || "",
+  };
+}
+
+function currentTaskDraft() {
+  const task = state.editingTaskId ? getTask(state.editingTaskId) : null;
+  if (!state.taskDraft) state.taskDraft = taskDraftFromTask(task);
+  return state.taskDraft;
+}
+
+function syncTaskDraft() {
+  const title = document.querySelector("#task-title");
+  const topic = document.querySelector("#task-topic");
+  const description = document.querySelector("#task-description");
+  if (!title && !topic && !description) return;
+  state.taskDraft = {
+    title: title?.value || "",
+    topic: topic?.value || "",
+    description: description?.value || "",
+  };
+}
+
 function retakeCurrentTask() {
   if (!state.selectedTaskId) return;
   go("practice", {
@@ -1630,11 +2064,26 @@ function renderHome() {
       <section class="panel stack">
         <h2>${localMode ? "进入练习 / Start Preview" : "进入练习 / Student Entry"}</h2>
         ${localMode ? `
-          <button data-action="student-preview-login">直接进入 / Enter preview</button>
+          <a class="button-link" href="?preview-level=level1" data-action="preview-level" data-level="level1">直接进入 / Enter preview</a>
+          <div class="preview-level-actions">
+            <a class="button-link secondary" href="?preview-level=level1" data-action="preview-level" data-level="level1">
+              <strong>G5</strong>
+              <span>Level 1 / 基础入门</span>
+            </a>
+            <a class="button-link secondary" href="?preview-level=level2" data-action="preview-level" data-level="level2">
+              <strong>G6</strong>
+              <span>Level 2 / 核心表达</span>
+            </a>
+            <a class="button-link secondary" href="?preview-level=level3" data-action="preview-level" data-level="level3">
+              <strong>G7/8</strong>
+              <span>Level 3 / 加速入门</span>
+            </a>
+          </div>
+          <p class="muted local-only-note">本地调试专用：正式版本不会显示这三个入口。</p>
         ` : `
           <div class="grid">
             <label>组合代码 / Login Code
-              <input id="student-login-code" value="${escapeHtml(state.student?.access_code || "")}" placeholder="例如 G7CN-Kevin" autocomplete="off" />
+              <input id="student-login-code" value="${escapeHtml(state.student?.access_code || "")}" placeholder="例如 G7CNKevin" autocomplete="off" />
             </label>
           </div>
           <button data-action="student-login">登录 / Log in</button>
@@ -1645,23 +2094,24 @@ function renderHome() {
 }
 
 function renderLevelSelect() {
+  const assignedLevelId = levelForClassCode(state.student?.class_code);
+  const level = getLevel(assignedLevelId);
   return layout(`
     <section class="view">
       <div class="panel row wrap">
         <div style="flex: 1">
           <span class="pill">${escapeHtml(state.student?.class_name || "")}</span>
-          <h2>${escapeHtml(state.student?.student_name || "")}，请选择学习路径 / Choose a level</h2>
+          <h2>${escapeHtml(state.student?.student_name || "")} 的学习路径 / Assigned level</h2>
+          <p class="muted">系统已根据班级 code ${escapeHtml(state.student?.class_code || "")} 自动匹配学习路径。</p>
         </div>
       </div>
-      <div class="grid">
-        ${LEVELS.map((level) => `
-          <article class="card">
-            <span class="pill level-label">${escapeHtml(level.zh)}</span>
-            <h2 class="level-title">${escapeHtml(level.title)}</h2>
-            <p class="muted">${escapeHtml(level.note)}</p>
-            <button data-action="start-level" data-level="${level.id}">进入 / Enter ${escapeHtml(level.zh)}</button>
-          </article>
-        `).join("")}
+      <div class="student-level-single">
+        <article class="card student-level-card">
+          <span class="pill level-label">${escapeHtml(level.zh)}</span>
+          <h2 class="level-title">${escapeHtml(level.title)}</h2>
+          <p class="muted">${escapeHtml(level.note)}</p>
+          <button data-action="start-level" data-level="${level.id}">进入 / Enter ${escapeHtml(level.zh)}</button>
+        </article>
       </div>
     </section>
   `);
@@ -1679,6 +2129,7 @@ function renderTaskList() {
   };
   const tasks = sortTasksByTitle(state.data.tasks.filter((task) => task.level === state.level && task.status === "published"));
   const level = getLevel(state.level);
+  const latestTaskId = latestPublishedTaskIdForLevel(state.data.tasks, state.level);
   return layout(`
     <section class="view">
       <div class="panel row wrap">
@@ -1686,24 +2137,26 @@ function renderTaskList() {
           <span class="pill">${escapeHtml(classRow.name)} · ${escapeHtml(level.zh)}</span>
           <h2>${escapeHtml(state.student.student_name)} 的任务包</h2>
         </div>
-        <button class="secondary" data-action="level-select">切换路径 / Change level</button>
       </div>
-      <div class="grid">
-        ${tasks.length ? tasks.map((task) => {
+      <div class="task-list-grid">
+        ${tasks.length ? tasks.map((task, index) => {
           const score = getStudentTaskScore(task.id);
+          const isLatest = task.id === latestTaskId;
           return `
-            <article class="card">
-              <div class="row wrap">
-                <span class="pill live">已发布</span>
+            <article class="card student-task-card">
+              <div class="student-task-card__badges">
+                ${isLatest ? `<span class="pill task-badge latest">Latest task</span>` : ""}
+                <span class="pill task-badge ${score ? "complete" : "incomplete"}">${score ? "Completed" : "Incomplete"}</span>
+              </div>
+              <div class="row wrap student-task-card__meta">
                 <span class="pill">${escapeHtml(taskMeta(task))}</span>
               </div>
               <h2>${escapeHtml(task.title)}</h2>
-              <p class="muted">${escapeHtml(task.description || "完成这个任务包中的题目，提交后查看成绩反馈。")}</p>
-              <div class="row wrap">
+              <div class="student-task-card__footer">
                 <span class="pill">${getQuestions(task.id).length} 道题</span>
                 ${score ? `<span class="pill">最近 ${score.latest_score}/${score.latest_max_score} · ${score.latest_accuracy}%</span>` : `<span class="pill">尚未完成</span>`}
+                <button data-action="open-task" data-task="${task.id}">${score ? "再次练习 / Try again" : "开始练习 / Start"}</button>
               </div>
-              <button data-action="open-task" data-task="${task.id}">${score ? "再次练习 / Try again" : "开始练习 / Start"}</button>
             </article>
           `;
         }).join("") : `<div class="panel muted">这个班级和学习路径下暂时没有已发布任务。</div>`}
@@ -1990,6 +2443,7 @@ function renderTeacherLogin() {
 function renderTaskEditor() {
   const task = state.editingTaskId ? getTask(state.editingTaskId) : null;
   const questions = task ? getQuestions(task.id) : state.pendingQuestions;
+  const taskDraft = currentTaskDraft();
   const editing = state.editingQuestion || {};
   const activeCategory = editing.category || categoryForQuestionType(editing.template_id || editing.type || "vocab_match_han_en");
   const categoryTemplates = getTemplatesForCategory(activeCategory);
@@ -2001,13 +2455,13 @@ function renderTaskEditor() {
       <span class="pill">当前学习路径：${escapeHtml(currentLevel.title)} / ${escapeHtml(currentLevel.zh)}</span>
       <div class="grid">
         <label>任务标题
-          <input id="task-title" value="${escapeHtml(task?.title || "")}" />
+          <input id="task-title" value="${escapeHtml(taskDraft.title)}" />
         </label>
         <label>涉及话题
-          <input id="task-topic" value="${escapeHtml(task?.topic || "")}" placeholder="例如 自我介绍 / 家庭 / 时间表达" />
+          <input id="task-topic" value="${escapeHtml(taskDraft.topic)}" placeholder="例如 自我介绍 / 家庭 / 时间表达" />
         </label>
         <label>任务简介
-          <input id="task-description" value="${escapeHtml(task?.description || "")}" placeholder="简要说明这个任务包练什么。" />
+          <input id="task-description" value="${escapeHtml(taskDraft.description)}" placeholder="简要说明这个任务包练什么。" />
         </label>
       </div>
       ${task ? "" : `
@@ -2063,7 +2517,14 @@ function renderTeacherDashboard() {
               `).join("")}
             </div>
             <div class="table-wrap">
-              <table>
+              <table class="task-package-table">
+                <colgroup>
+                  <col class="task-col-title" />
+                  <col class="task-col-topic" />
+                  <col class="task-col-description" />
+                  <col class="task-col-count" />
+                  <col class="task-col-actions" />
+                </colgroup>
                 <thead><tr><th>任务标题</th><th>核心话题</th><th>任务简介</th><th>题目总数</th><th>操作</th></tr></thead>
                 <tbody>
                   ${levelTasks.length ? levelTasks.map((task) => `
@@ -2167,7 +2628,7 @@ function renderClassAdmin() {
                       <input value="${escapeHtml(item.name)} (${escapeHtml(item.class_code)})" disabled />
                     </label>
                     <label>组合代码 / Login Code
-                      <input id="registered-student-code" placeholder="${escapeHtml(item.class_code)}-Kevin" />
+                      <input id="registered-student-code" placeholder="${escapeHtml(item.class_code)}Kevin" />
                     </label>
                     <button class="compact student-add-button" data-action="save-allowed-student" data-class="${item.id}" data-class-code="${escapeHtml(item.class_code)}">新增</button>
                   </div>
@@ -2180,7 +2641,7 @@ function renderClassAdmin() {
                             <td>${escapeHtml(student.student_name)}</td>
                             <td>${escapeHtml(student.gender || "暂无")}</td>
                             <td>${escapeHtml(item.name)}</td>
-                            <td>${escapeHtml(student.access_code || `${item.class_code}-${student.student_name}`)}</td>
+                            <td>${escapeHtml(studentAccessCode(student, item.class_code))}</td>
                             <td><button class="secondary compact" data-action="delete-student" data-student="${student.id}" data-class="${item.id}">删除 / Delete</button></td>
                           </tr>
                         `).join("") : `<tr><td colspan="5">这个班级还没有注册学生。</td></tr>`}
@@ -2208,9 +2669,18 @@ function renderAnalytics() {
   const tasks = state.data.tasks || [];
   const questions = state.data.questions || [];
   const students = state.data.class_students || [];
-  const activeClass = state.analyticsClassId === "__closed" ? null : classes.find((item) => item.id === state.analyticsClassId) || classes[0] || null;
-  if (activeClass && state.analyticsClassId !== activeClass.id) state.analyticsClassId = activeClass.id;
-  const publishedTasks = activeClass ? sortTasksByTitle(tasks.filter((task) => task.status === "published")) : [];
+  const classGroups = groupedClassesByCode(classes);
+  const activeGroup = state.analyticsGroupId === "__closed"
+    ? null
+    : classGroups.find((group) => group.id === state.analyticsGroupId) || null;
+  const activeGroupClasses = activeGroup?.classes || [];
+  const activeClass = state.analyticsClassId === "__closed"
+    ? null
+    : activeGroupClasses.find((item) => item.id === state.analyticsClassId) || null;
+  const activeClassLevel = activeClass ? levelForClassCode(activeClass.class_code) : "";
+  const publishedTasks = activeClass
+    ? sortTasksByTitle(tasks.filter((task) => task.status === "published" && task.level === activeClassLevel))
+    : [];
   const activeTask = state.analyticsTaskId === "__closed" ? null : publishedTasks.find((task) => task.id === state.analyticsTaskId) || publishedTasks[0] || null;
   if (activeTask && state.analyticsTaskId !== activeTask.id) state.analyticsTaskId = activeTask.id;
   const activeClassStudents = activeClass ? students.filter((student) => student.class_id === activeClass.id && student.active !== false) : [];
@@ -2240,11 +2710,54 @@ function renderAnalytics() {
     <section class="panel stack">
       <h2>数据分析</h2>
       <div class="class-strip-list">
-        ${classes.length ? classes.map((item) => {
+        ${classGroups.length ? classGroups.map((group) => {
+          const isGroupOpen = activeGroup?.id === group.id;
+          const groupLevel = levelForClassCode(group.id);
+          const groupTasks = tasks.filter((task) => task.status === "published" && task.level === groupLevel);
+          const groupTaskIds = new Set(groupTasks.map((task) => task.id));
+          const groupAttempts = attempts.filter((attempt) => (
+            classGroupKey(attempt.class_code) === group.id &&
+            groupTaskIds.has(attempt.task_id)
+          ));
+          const groupLatestTask = latestPublishedTaskForLevel(tasks, groupLevel);
+          const groupAverageAccuracy = groupLatestTask
+            ? averageAccuracyForTask(attempts, groupLatestTask.id, group.classes.map((item) => item.class_code))
+            : null;
+          const groupTaskCount = groupTasks.length;
+          return `
+            <article class="class-group-strip ${isGroupOpen ? "is-open" : ""}">
+              <button class="class-group-strip__button" data-action="select-analytics-group" data-group="${escapeHtml(group.id)}">
+                <span>
+                  <strong>${escapeHtml(group.title)}</strong>
+                  <small>${group.classes.length} 个班级</small>
+                </span>
+                <span class="class-strip__meta">
+                  <span class="latest-accuracy">最新任务准确率 ${formatAccuracy(groupAverageAccuracy)}</span>
+                  <span>${groupTaskCount} 个已发布任务</span>
+                  <span>${groupAttempts.length} 次提交</span>
+                  <span>${isGroupOpen ? "收起" : "打开"}</span>
+                </span>
+              </button>
+              ${isGroupOpen ? `
+                <div class="class-group-detail">
+                  ${group.classes.map((item) => {
           const isOpen = activeClass?.id === item.id;
-          const classTasks = sortTasksByTitle(tasks.filter((task) => task.status === "published"));
-          const classAttempts = attempts.filter((attempt) => normalizeAnswer(attempt.class_code) === normalizeAnswer(item.class_code));
-          const classScores = scores.filter((score) => normalizeAnswer(score.class_code) === normalizeAnswer(item.class_code));
+          const classLevel = levelForClassCode(item.class_code);
+          const classTasks = sortTasksByTitle(tasks.filter((task) => task.status === "published" && task.level === classLevel));
+          const classTaskIds = new Set(classTasks.map((task) => task.id));
+          const classAttempts = attempts.filter((attempt) => (
+            normalizeAnswer(attempt.class_code) === normalizeAnswer(item.class_code) &&
+            classTaskIds.has(attempt.task_id)
+          ));
+          const latestClassTask = latestPublishedTaskForLevel(tasks, classLevel);
+          const classLatestAverageAccuracy = latestClassTask
+            ? averageAccuracyForTask(attempts, latestClassTask.id, [item.class_code])
+            : null;
+          const classSummary = analyticsForClassTask(latestClassTask, item, attempts, answers, questions);
+          const classScores = scores.filter((score) => (
+            normalizeAnswer(score.class_code) === normalizeAnswer(item.class_code) &&
+            classTaskIds.has(score.task_id)
+          ));
           const participantCount = new Set(classAttempts.map((attempt) => normalizeAnswer(attempt.student_name)).filter(Boolean)).size;
           const answerPersonTimes = classAttempts.length;
           const bestRatesByStudent = Object.values(classScores.reduce((map, score) => {
@@ -2266,6 +2779,7 @@ function renderAnalytics() {
                   <small>${escapeHtml(item.class_code)}</small>
                 </span>
                 <span class="class-strip__meta">
+                  <span class="latest-accuracy">最新任务准确率 ${formatAccuracy(classLatestAverageAccuracy)}</span>
                   <span>${classTasks.length} 个已发布任务</span>
                   <span>${classAttempts.length} 次提交</span>
                   <span>${isOpen ? "收起" : "打开"}</span>
@@ -2273,6 +2787,7 @@ function renderAnalytics() {
               </button>
               ${isOpen ? `
                 <div class="class-detail stack">
+                  ${renderAnalyticsSummary(classSummary)}
                   <div class="metric-row">
                     <div class="metric"><span class="muted">发布任务</span><strong>${classTasks.length}</strong></div>
                     <div class="metric"><span class="muted">参与学生</span><strong>${participantCount}</strong></div>
@@ -2363,7 +2878,7 @@ function renderAnalytics() {
                         </div>
                         <div class="table-wrap">
                           <table>
-                            <thead><tr><th>题目</th><th>题型</th><th>学生答案</th><th>结果</th></tr></thead>
+                            <thead><tr><th>题目</th><th>题型</th><th>学生答案</th><th>结果</th><th>老师复判</th></tr></thead>
                             <tbody>
                               ${taskQuestions.map((question) => {
                                 const row = selectedAnswers.find((answer) => answer.question_id === question.id);
@@ -2372,8 +2887,9 @@ function renderAnalytics() {
                                   <tr class="${isWrong ? "answer-wrong" : ""}">
                                     <td>${escapeHtml(question.prompt)}</td>
                                     <td>${escapeHtml(question.type)}</td>
-                                    <td>${escapeHtml(formatAnswerForStudent(row?.student_answer))}</td>
+                                    <td>${renderTeacherAnswerValue(row?.student_answer)}</td>
                                     <td>${!row ? "未作答" : row.is_correct === null ? "开放题" : row.is_correct ? "做对" : "做错"}</td>
+                                    <td>${renderTeacherReviewControls(row)}</td>
                                   </tr>
                                 `;
                               }).join("")}
@@ -2426,6 +2942,11 @@ function renderAnalytics() {
                       </table>
                     </div>
                   ` : ""}
+                </div>
+              ` : ""}
+            </article>
+          `;
+                  }).join("")}
                 </div>
               ` : ""}
             </article>
@@ -2621,12 +3142,12 @@ function questionDraftFromForm(overrides = {}) {
 
 function evaluate(question, answer) {
   if (isOpenQuestion(question)) {
-    const score = scoreOpenResponse(answer);
-    const passed = score > 0;
+    const result = analyzeOpenResponse(answer);
+    const passed = result.score > 0;
     return {
       isCorrect: passed,
-      score,
-      text: `${passed ? "Open response accepted" : "Open response needs more detail"}\nYour answer: ${formatAnswerForStudent(answer)}\nScore: ${score}/1\nHint: ${openResponseHint(answer, passed)}`,
+      score: result.score,
+      text: `${passed ? "Open response accepted" : "Open response needs revision"}\nYour answer: ${formatAnswerForStudent(answer)}\nScore: ${result.score}/1\nHint: ${result.hint}`,
     };
   }
   let correct = false;
@@ -2658,19 +3179,49 @@ function evaluate(question, answer) {
 }
 
 function scoreOpenResponse(answer) {
-  if (answer && typeof answer === "object" && answer.audio) return 1;
+  return analyzeOpenResponse(answer).score;
+}
+
+function analyzeOpenResponse(answer) {
+  if (answer && typeof answer === "object" && answer.audio) {
+    return { score: 1, hint: "Audio answer recorded. Your teacher can review it later." };
+  }
   const text = String(answer || "").trim();
-  if (!text) return 0;
-  const hasChinese = /[\u3400-\u9fff]/.test(text);
-  const meaningfulLength = [...text.replace(/\s+/g, "")].length >= 4;
-  const hasSentenceShape = /[。！？!?.,，]/.test(text) || [...text].length >= 6;
-  return hasChinese && meaningfulLength && hasSentenceShape ? 1 : 0;
+  if (!text) return { score: 0, hint: "Write at least one short Chinese sentence." };
+
+  const chars = [...text.replace(/\s+/g, "")];
+  const chineseChars = chars.filter((char) => /[\u3400-\u9fff]/.test(char));
+  const latinChars = chars.filter((char) => /[A-Za-z]/.test(char));
+  if (!chineseChars.length) {
+    return { score: 0, hint: "Please answer in Chinese characters, not English or pinyin only." };
+  }
+  if (latinChars.length > chineseChars.length / 2) {
+    return { score: 0, hint: "Use mainly Chinese characters. English can only be a small helper, not the main answer." };
+  }
+  if (chineseChars.length < 4) {
+    return { score: 0, hint: "Write a complete short Chinese sentence, not only one word or a few characters." };
+  }
+
+  const chineseOnly = chineseChars.join("");
+  const uniqueRatio = new Set(chineseChars).size / chineseChars.length;
+  if (/(.)\1{2,}/u.test(chineseOnly) || (chineseChars.length >= 6 && uniqueRatio < 0.45)) {
+    return { score: 0, hint: "This does not look like a clear Chinese sentence. Please write a real sentence." };
+  }
+
+  const hasSubjectLikeWord = /(我|我们|你|你们|他|她|他们|老师|学生|朋友|同学|家人|妈妈|爸爸|学校|中文|汉语|旅行|旅游|今天|昨天|明天|周末|上午|下午|晚上|这个|那个)/.test(text);
+  const hasPredicateLikeWord = /(是|有|在|去|来|到|看|吃|喝|买|学|学习|喜欢|想|要|会|能|可以|觉得|认为|参加|玩|住|做|写|说|听|读|坐|走|跑|开心|高兴|难过|忙|累|好|不错|有趣|漂亮|重要)/.test(text);
+  const hasSentenceEnding = /[。！？!?]$/.test(text) || /(了|的|吗|呢|吧|过)$/.test(text);
+  const hasSentencePattern = /(我|我们|你|他|她|老师|学生|朋友|同学|家人|学校|中文|汉语|今天|昨天|明天|周末).{0,12}(是|有|在|去|来|到|看|吃|喝|买|学|喜欢|想|要|会|觉得|玩|做|写|说|听|读|开心|高兴|忙|累)/.test(text);
+
+  if (!(hasSubjectLikeWord && hasPredicateLikeWord && (hasSentenceEnding || hasSentencePattern))) {
+    return { score: 0, hint: "Write a clear Chinese sentence with a subject and meaning, for example: 我今天很开心。 or 我去了上海。" };
+  }
+
+  return { score: 1, hint: "Your answer looks like a basic Chinese sentence. Your teacher can still adjust the score later." };
 }
 
 function openResponseHint(answer, passed) {
-  if (passed) return "Your sentence has enough Chinese expression for this practice. Your teacher can still adjust it later.";
-  if (!String(answer || "").trim()) return "Write at least one short Chinese sentence.";
-  return "Use Chinese characters and write a complete short sentence.";
+  return analyzeOpenResponse(answer).hint;
 }
 
 function feedbackText(question, answer, correct) {
@@ -2806,6 +3357,10 @@ function stopRecording() {
 }
 
 function bindEvents() {
+  ["#task-title", "#task-topic", "#task-description"].forEach((selector) => {
+    const input = document.querySelector(selector);
+    if (input) input.addEventListener("input", syncTaskDraft);
+  });
   document.querySelectorAll("[data-answer-input]").forEach((input) => {
     input.addEventListener("input", () => {
       state.answers[input.dataset.answerInput] = input.value;
@@ -2840,6 +3395,7 @@ function bindEvents() {
   const questionTypeSelect = document.querySelector("#question-type");
   if (questionTypeSelect) {
     questionTypeSelect.addEventListener("change", () => {
+      syncTaskDraft();
       const selectedTemplate = getTemplate(questionTypeSelect.value);
       state.editingQuestion = questionDraftFromForm({
         type: selectedTemplate?.type || questionTypeSelect.value,
@@ -2860,6 +3416,7 @@ function bindEvents() {
   }
   document.querySelectorAll("[data-pair-image-input]").forEach((input) => {
     input.addEventListener("change", () => {
+      syncTaskDraft();
       const file = input.files?.[0];
       if (!file) return;
       if (!file.type.startsWith("image/")) {
@@ -2891,6 +3448,7 @@ function bindEvents() {
   document.querySelectorAll("[data-action]").forEach((element) => {
     element.addEventListener("click", async () => {
       const action = element.dataset.action;
+      if (!["new-task", "edit-task", "select-task-level"].includes(action)) syncTaskDraft();
       if (action === "home") go("home", { student: null, level: "", selectedTaskId: null, answers: {}, feedback: {}, summary: null });
       if (action === "config") go(state.teacher ? "config" : "teacher-login");
       if (action === "teacher") {
@@ -2994,6 +3552,7 @@ function bindEvents() {
         await run(async () => {
           if (!loginCode) throw new Error("请输入组合代码。");
           await api.validateStudent(loginCode, "");
+          state.level = levelForClassCode(state.student?.class_code);
           state.view = "level-select";
         });
       }
@@ -3002,8 +3561,16 @@ function bindEvents() {
           const previewStudent = defaultPreviewStudent();
           if (!previewStudent) throw new Error("本地演示数据中没有学生。");
           state.student = previewStudent;
+          state.level = levelForClassCode(previewStudent.class_code);
           state.view = "level-select";
           await api.loadAll();
+        });
+      }
+      if (action === "preview-level") {
+        await run(async () => {
+          if (!isLocalPreview()) throw new Error("这个入口只用于本地调试。");
+          loadLocalPreviewLevel(element.dataset.level);
+          state.view = "task-list";
         });
       }
       if (action === "submit-task") {
@@ -3050,6 +3617,7 @@ function bindEvents() {
           adminTab: "tasks",
           adminTaskLevel: element.dataset.level,
           editingTaskId: null,
+          taskDraft: taskDraftFromTask(),
           editingQuestion: null,
           pendingQuestions: [],
         });
@@ -3063,6 +3631,16 @@ function bindEvents() {
         go("teacher-dashboard", {
           adminTab: "analytics",
           analyticsClassId: nextClassId,
+          analyticsTaskId: "",
+          analyticsStudentName: "",
+        });
+      }
+      if (action === "select-analytics-group") {
+        const nextGroupId = state.analyticsGroupId === element.dataset.group ? "__closed" : element.dataset.group;
+        go("teacher-dashboard", {
+          adminTab: "analytics",
+          analyticsGroupId: nextGroupId,
+          analyticsClassId: "",
           analyticsTaskId: "",
           analyticsStudentName: "",
         });
@@ -3088,10 +3666,19 @@ function bindEvents() {
           analyticsStudentSort: element.dataset.sort || "name",
         });
       }
-      if (action === "new-task") go("teacher-dashboard", { adminTab: "tasks", editingTaskId: null, editingQuestion: null, pendingQuestions: [] });
+      if (action === "review-answer") {
+        await run(async () => {
+          await api.reviewAnswer(element.dataset.answer, element.dataset.correct === "true");
+          state.view = "teacher-dashboard";
+          state.adminTab = "analytics";
+          state.analyticsStudentName = state.analyticsStudentName || element.dataset.student || "";
+        });
+        render();
+      }
+      if (action === "new-task") go("teacher-dashboard", { adminTab: "tasks", editingTaskId: null, taskDraft: taskDraftFromTask(), editingQuestion: null, pendingQuestions: [] });
       if (action === "edit-task") {
         const task = getTask(element.dataset.task);
-        go("teacher-dashboard", { adminTab: "tasks", adminTaskLevel: task?.level || state.adminTaskLevel, editingTaskId: element.dataset.task, editingQuestion: null, pendingQuestions: [] });
+        go("teacher-dashboard", { adminTab: "tasks", adminTaskLevel: task?.level || state.adminTaskLevel, editingTaskId: element.dataset.task, taskDraft: taskDraftFromTask(task), editingQuestion: null, pendingQuestions: [] });
       }
       if (action === "save-class") {
         const class_code = document.querySelector("#class-code").value.trim();
@@ -3109,7 +3696,7 @@ function bindEvents() {
         const classCode = element.dataset.classCode || "";
         const student_name = document.querySelector("#registered-student-name")?.value.trim() || document.querySelector("#allowed-student-name")?.value.trim() || "";
         const gender = document.querySelector("#registered-student-gender")?.value.trim() || "";
-        const access_code = document.querySelector("#registered-student-code")?.value.trim() || (classCode && student_name ? `${classCode}-${student_name}` : "");
+        const access_code = document.querySelector("#registered-student-code")?.value.trim() || (classCode && student_name ? buildAccessCode(classCode, student_name) : "");
         await run(async () => {
           if (!class_id || !student_name) throw new Error("请选择班级并填写学生姓名。");
           if (!access_code) throw new Error("请填写组合代码。");
@@ -3134,6 +3721,7 @@ function bindEvents() {
           await api.deleteClass(element.dataset.class);
           state.adminClassId = "__closed";
           state.analyticsClassId = "__closed";
+          state.analyticsGroupId = "__closed";
           state.analyticsTaskId = "";
           state.analyticsStudentName = "";
           state.adminTab = "classes";
@@ -3150,13 +3738,14 @@ function bindEvents() {
         });
       }
       if (action === "save-task") {
+        syncTaskDraft();
         const wasNewTask = !state.editingTaskId;
         const pendingQuestions = state.pendingQuestions.map((question) => ({ ...question }));
         const taskPayload = {
           id: state.editingTaskId || undefined,
-          title: document.querySelector("#task-title").value.trim(),
-          topic: document.querySelector("#task-topic").value.trim(),
-          description: document.querySelector("#task-description").value.trim(),
+          title: state.taskDraft?.title?.trim() || "",
+          topic: state.taskDraft?.topic?.trim() || "",
+          description: state.taskDraft?.description?.trim() || "",
           practice_number: getTask(state.editingTaskId)?.practice_number || 1,
           class_id: getTask(state.editingTaskId)?.class_id || state.data.classes?.[0]?.id,
           level: state.adminTaskLevel,
@@ -3178,6 +3767,7 @@ function bindEvents() {
           }
           await api.loadAll();
           state.editingTaskId = taskId;
+          state.taskDraft = taskDraftFromTask(getTask(taskId));
           state.editingQuestion = null;
           state.pendingQuestions = [];
           state.adminTab = "tasks";
@@ -3219,7 +3809,10 @@ function bindEvents() {
         render();
       }
       if (action === "clear-question-form") {
-        state.editingQuestion = null;
+        const draft = questionDraftFromForm();
+        state.editingQuestion = blankQuestionDraftForTemplate(draft.template_id, {
+          sortOrder: draft.sort_order || nextQuestionSortOrder(),
+        });
         render();
       }
       if (action === "add-question-pair") {
@@ -3329,7 +3922,9 @@ function bindEvents() {
           } else {
             await api.saveQuestion(payload);
           }
-          state.editingQuestion = null;
+          state.editingQuestion = blankQuestionDraftForTemplate(payload.template_id, {
+            sortOrder: nextQuestionSortOrder(),
+          });
           state.view = "teacher-dashboard";
         });
       }
@@ -3468,6 +4063,11 @@ async function init() {
       state.teacher = data.session?.user || null;
     }
     await api.loadAll();
+    const previewLevel = new URLSearchParams(window.location.search).get("preview-level");
+    if (previewLevel && isLocalPreview()) {
+      loadLocalPreviewLevel(previewLevel);
+      state.view = "task-list";
+    }
   } catch (error) {
     state.data = loadLocalData();
     state.message = "当前使用本地演示数据。";
