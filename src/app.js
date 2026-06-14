@@ -1772,6 +1772,170 @@ function latestPublishedTaskIdForLevel(tasks, levelId) {
   return latestPublishedTaskForLevel(tasks, levelId)?.id || "";
 }
 
+function demoWrongAnswer(question, correctAnswer) {
+  if (question.type === "matching" && correctAnswer && typeof correctAnswer === "object" && !Array.isArray(correctAnswer)) {
+    const entries = Object.entries(correctAnswer);
+    if (entries.length < 2) return Object.fromEntries(entries.map(([left]) => [left, "Not sure"]));
+    const shifted = entries.map(([, right], index) => entries[(index + 1) % entries.length][1]);
+    return Object.fromEntries(entries.map(([left], index) => [left, shifted[index]]));
+  }
+  if (Array.isArray(correctAnswer)) {
+    if (question.template_id === "grammar_true_false") return correctAnswer.includes("正确") ? ["错误"] : ["正确"];
+    if (correctAnswer.length < 2) return ["错误"];
+    return [...correctAnswer].reverse();
+  }
+  if (question.type === "open_response") return "啊发生的奥德赛阿斯蒂芬";
+  if (typeof correctAnswer === "string" && correctAnswer) return `${correctAnswer} 错`;
+  return "错误";
+}
+
+function demoStudentAnswer(question, variant) {
+  const correctAnswer = question.correct_answer;
+  if (question.type === "open_response") {
+    if (variant % 5 === 0) {
+      return {
+        type: "audio",
+        audio: "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=",
+      };
+    }
+    if (variant % 4 === 0) return "啊发生的奥德赛阿斯蒂芬";
+    if (variant % 3 === 0) return "我昨天去了北京，也吃了很多好吃的东西。";
+    return "我今天很开心，因为我学习了中文。";
+  }
+  if (variant % 3 === 0) return demoWrongAnswer(question, correctAnswer);
+  if (variant % 4 === 0 && Array.isArray(correctAnswer) && correctAnswer.length > 1) return correctAnswer.slice(0, -1);
+  if (correctAnswer && typeof correctAnswer === "object" && !Array.isArray(correctAnswer)) return { ...correctAnswer };
+  if (Array.isArray(correctAnswer)) return [...correctAnswer];
+  return correctAnswer || "正确";
+}
+
+function upsertDemoStudent(data, classRow, studentName, gender) {
+  const existing = data.class_students.find((student) => (
+    student.class_id === classRow.id &&
+    normalizeAnswer(student.student_name) === normalizeAnswer(studentName)
+  ));
+  const payload = {
+    class_id: classRow.id,
+    student_name: studentName,
+    gender,
+    access_code: buildAccessCode(classRow.class_code, studentName),
+    active: true,
+  };
+  if (existing) {
+    Object.assign(existing, payload);
+    return existing;
+  }
+  const student = { id: crypto.randomUUID(), ...payload };
+  data.class_students.push(student);
+  return student;
+}
+
+function upsertDemoScore(data, attempt) {
+  const sameAttempts = data.student_attempts
+    .filter((item) => (
+      item.task_id === attempt.task_id &&
+      normalizeAnswer(item.class_code) === normalizeAnswer(attempt.class_code) &&
+      normalizeAnswer(item.student_name) === normalizeAnswer(attempt.student_name)
+    ))
+    .sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0));
+  const latestAttempt = sameAttempts[0] || attempt;
+  const scoreRow = data.student_task_scores.find((item) => (
+    item.task_id === attempt.task_id &&
+    normalizeAnswer(item.class_code) === normalizeAnswer(attempt.class_code) &&
+    normalizeAnswer(item.student_name) === normalizeAnswer(attempt.student_name)
+  ));
+  const scorePayload = {
+    id: scoreRow?.id || crypto.randomUUID(),
+    task_id: attempt.task_id,
+    class_code: attempt.class_code,
+    student_name: attempt.student_name,
+    level: attempt.level,
+    latest_score: latestAttempt.score,
+    latest_max_score: latestAttempt.max_score,
+    latest_accuracy: latestAttempt.accuracy,
+    latest_duration_seconds: latestAttempt.duration_seconds || null,
+    best_score: sameAttempts.reduce((best, item) => Math.max(best, Number(item.score || 0)), 0),
+    attempts_count: sameAttempts.length,
+    updated_at: latestAttempt.submitted_at || new Date().toISOString(),
+  };
+  if (scoreRow) Object.assign(scoreRow, scorePayload);
+  else data.student_task_scores.push(scorePayload);
+}
+
+function seedDiverseLocalAttempts() {
+  const data = loadLocalData();
+  data.student_attempts = data.student_attempts || [];
+  data.student_answers = data.student_answers || [];
+  data.student_task_scores = data.student_task_scores || [];
+  const demoNames = [
+    ["Mia", "Female"],
+    ["Leo", "Male"],
+    ["Anna", "Female"],
+    ["小林", "女"],
+    ["Noah", "Male"],
+    ["Lina", "Female"],
+  ];
+  let attemptCount = 0;
+  let answerCount = 0;
+  const now = Date.now();
+  (data.classes || []).forEach((classRow, classIndex) => {
+    const classLevel = levelForClassCode(classRow.class_code);
+    const classTasks = sortTasksByTitle((data.tasks || []).filter((task) => task.level === classLevel && task.status === "published")).slice(0, 2);
+    if (!classTasks.length) return;
+    const students = demoNames.slice(0, 3).map(([name, gender], index) => (
+      upsertDemoStudent(data, classRow, `${name}${classGroupKey(classRow.class_code)}${index + 1}`, gender)
+    ));
+    classTasks.forEach((task, taskIndex) => {
+      const questions = (data.questions || [])
+        .filter((question) => question.task_id === task.id)
+        .sort((a, b) => Number(a.sort_order || 0) - Number(b.sort_order || 0));
+      if (!questions.length) return;
+      students.forEach((student, studentIndex) => {
+        const submittedAt = new Date(now - ((classIndex * 12 + taskIndex * 4 + studentIndex) * 7 * 60 * 1000)).toISOString();
+        const answers = questions.map((question, questionIndex) => {
+          const studentAnswer = demoStudentAnswer(question, classIndex + taskIndex + studentIndex + questionIndex);
+          const result = evaluate(question, studentAnswer);
+          return {
+            id: crypto.randomUUID(),
+            question_id: question.id,
+            question_type: question.type,
+            student_answer: studentAnswer,
+            is_correct: result.isCorrect,
+            score: result.score,
+          };
+        });
+        const objectiveRows = answers.filter((row) => row.is_correct !== null);
+        const score = objectiveRows.reduce((sum, row) => sum + Number(row.score || 0), 0);
+        const maxScore = objectiveRows.length;
+        const attempt = {
+          id: crypto.randomUUID(),
+          task_id: task.id,
+          class_code: classRow.class_code,
+          student_name: student.student_name,
+          level: task.level,
+          score,
+          max_score: maxScore,
+          accuracy: maxScore ? Math.round((score / maxScore) * 100) : 0,
+          completed_count: answers.filter((row) => row.student_answer !== null && row.student_answer !== undefined && row.student_answer !== "").length,
+          total_count: questions.length,
+          duration_seconds: 95 + ((classIndex + taskIndex + studentIndex) * 37),
+          submitted_at: submittedAt,
+        };
+        data.student_attempts.push(attempt);
+        answers.forEach((answer) => {
+          data.student_answers.push({ ...answer, attempt_id: attempt.id });
+        });
+        upsertDemoScore(data, attempt);
+        attemptCount += 1;
+        answerCount += answers.length;
+      });
+    });
+  });
+  saveLocalData(data);
+  state.data = data;
+  return { attemptCount, answerCount };
+}
+
 function averageAccuracyForTask(attempts, taskId, classCodes) {
   const codeSet = new Set(classCodes.map((code) => normalizeAnswer(code)).filter(Boolean));
   const rows = attempts.filter((attempt) => (
@@ -4063,7 +4227,21 @@ async function init() {
       state.teacher = data.session?.user || null;
     }
     await api.loadAll();
-    const previewLevel = new URLSearchParams(window.location.search).get("preview-level");
+    const searchParams = new URLSearchParams(window.location.search);
+    if (searchParams.get("seed-demo-answers") && isLocalPreview()) {
+      const seeded = seedDiverseLocalAttempts();
+      state.teacher = state.teacher || { email: "本地调试" };
+      state.view = "teacher-dashboard";
+      state.adminTab = "analytics";
+      state.analyticsGroupId = "G5";
+      state.analyticsClassId = "";
+      state.analyticsTaskId = "";
+      state.analyticsStudentName = "";
+      setMessage(`已追加 ${seeded.attemptCount} 次测试提交、${seeded.answerCount} 条测试答案。`);
+      render();
+      return;
+    }
+    const previewLevel = searchParams.get("preview-level");
     if (previewLevel && isLocalPreview()) {
       loadLocalPreviewLevel(previewLevel);
       state.view = "task-list";
