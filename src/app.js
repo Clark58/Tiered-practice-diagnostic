@@ -1494,11 +1494,11 @@ function recordingKey(scope, questionId = "") {
   return `${scope}:${questionId || "draft"}`;
 }
 
-function renderRecordControl(scope, questionId = "", label = "录音") {
+function renderRecordControl(scope, questionId = "", label = "录音", { disabled = false } = {}) {
   const key = recordingKey(scope, questionId);
   const active = state.recording?.key === key;
   return `
-    <button class="${active ? "warning" : "secondary"} compact" data-action="${active ? "stop-recording" : "start-recording"}" data-record-scope="${scope}" data-question="${escapeHtml(questionId)}">
+    <button type="button" class="${active ? "warning" : "secondary"} compact" data-action="${active ? "stop-recording" : "start-recording"}" data-record-scope="${scope}" data-question="${escapeHtml(questionId)}" ${disabled ? "disabled" : ""}>
       ${active ? "停止录音" : label}
     </button>
     ${active ? `<span class="muted">录音中，最长 5 分钟。</span>` : ""}
@@ -2684,7 +2684,7 @@ function renderQuestion(question) {
         ${options.audio ? renderAudioPlayer(options.audio, "老师问题录音") : ""}
         ${answerMode === "audio" ? `
           <div class="row wrap">
-            ${renderRecordControl("student-answer", question.id, audioAnswer ? "重新录音回答" : "录音回答")}
+            ${renderRecordControl("student-answer", question.id, audioAnswer ? "重新录音回答" : "录音回答", { disabled: locked })}
           </div>
           ${renderAudioPlayer(audioAnswer, "你的录音回答")}
         ` : `
@@ -3714,8 +3714,22 @@ async function startRecording(scope, questionId = "") {
     render();
     return;
   }
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const recorder = new MediaRecorder(stream);
+  let stream;
+  let recorder;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeType = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"]
+      .find((type) => MediaRecorder.isTypeSupported?.(type));
+    recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+  } catch (error) {
+    stream?.getTracks().forEach((track) => track.stop());
+    state.recording = null;
+    state.message = error?.name === "NotAllowedError"
+      ? "浏览器没有获得麦克风权限，请允许麦克风后再录音。"
+      : `录音启动失败：${error?.message || "请检查浏览器麦克风权限。"}`;
+    render();
+    return;
+  }
   const chunks = [];
   recorder.addEventListener("dataavailable", (event) => {
     if (event.data?.size) chunks.push(event.data);
@@ -3729,9 +3743,11 @@ async function startRecording(scope, questionId = "") {
       if (scope === "teacher-question") {
         const draft = questionDraftFromForm();
         state.editingQuestion = { ...draft, expressionAudio: audio };
+        state.message = "老师录音问题已保存到当前题目草稿，请点击“保存题目”或“保存任务包”。";
       } else if (scope === "student-answer") {
         state.answers[questionId] = { type: "audio", audio };
         delete state.feedback[questionId];
+        state.message = "录音回答已保存，请继续检查或提交。";
       }
       state.recording = null;
       render();
@@ -3745,8 +3761,16 @@ async function startRecording(scope, questionId = "") {
       if (recorder.state !== "inactive") recorder.stop();
     }, 5 * 60 * 1000),
   };
-  recorder.start();
-  render();
+  try {
+    recorder.start();
+    render();
+  } catch (error) {
+    clearTimeout(state.recording.timeoutId);
+    stream.getTracks().forEach((track) => track.stop());
+    state.recording = null;
+    state.message = `录音启动失败：${error?.message || "当前浏览器无法启动录音。"}`;
+    render();
+  }
 }
 
 function stopRecording() {
@@ -3846,7 +3870,8 @@ function bindEvents() {
     });
   });
   document.querySelectorAll("[data-action]").forEach((element) => {
-    element.addEventListener("click", async () => {
+    element.addEventListener("click", async (event) => {
+      event.preventDefault();
       const action = element.dataset.action;
       if (!["new-task", "edit-task", "select-task-level"].includes(action)) syncTaskDraft();
       if (action === "home") go("home", { student: null, level: "", selectedTaskId: null, answers: {}, feedback: {}, summary: null });
