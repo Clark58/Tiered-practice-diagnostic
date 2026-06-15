@@ -209,6 +209,7 @@ const state = {
   analyticsTaskId: "",
   analyticsStudentName: "",
   analyticsStudentSort: "name",
+  pendingReviews: {},
   editingTaskId: null,
   taskDraft: null,
   editingQuestion: null,
@@ -1025,11 +1026,14 @@ function renderTeacherAnswerValue(answer) {
 function renderTeacherReviewControls(row) {
   if (!row) return "未作答";
   const current = row.is_correct === true ? "当前：做对" : row.is_correct === false ? "当前：做错" : "当前：未复判";
+  const hasPending = Object.prototype.hasOwnProperty.call(state.pendingReviews || {}, row.id);
+  const staged = hasPending ? state.pendingReviews[row.id] : row.is_correct;
   return `
     <div class="teacher-review-controls">
       <span>${escapeHtml(current)}</span>
-      <button class="secondary compact ${row.is_correct === true ? "active" : ""}" data-action="review-answer" data-answer="${escapeHtml(row.id)}" data-correct="true">判对</button>
-      <button class="secondary compact ${row.is_correct === false ? "active warning-text" : ""}" data-action="review-answer" data-answer="${escapeHtml(row.id)}" data-correct="false">判错</button>
+      <button class="secondary compact ${staged === true ? "active" : ""}" data-action="set-review-answer" data-answer="${escapeHtml(row.id)}" data-correct="true">判对</button>
+      <button class="secondary compact ${staged === false ? "active warning-text" : ""}" data-action="set-review-answer" data-answer="${escapeHtml(row.id)}" data-correct="false">判错</button>
+      <button class="compact" data-action="save-review-answer" data-answer="${escapeHtml(row.id)}" ${hasPending ? "" : "disabled"}>保存</button>
     </div>
   `;
 }
@@ -2068,6 +2072,150 @@ function renderAnalyticsSummary(summary) {
   `;
 }
 
+function renderAnalyticsTaskDetail({
+  activeTask,
+  activeClass,
+  activeClassStudents,
+  taskAttempts,
+  taskQuestions,
+  questionStats,
+  selectedAttempt,
+  selectedAnswers,
+}) {
+  if (!activeTask || !activeClass) return "";
+  const latestByStudent = latestAttemptsByStudent(taskAttempts);
+  const classAverageAccuracy = averageNumber(latestByStudent.map((attempt) => attempt.accuracy));
+  const classAverageDuration = averageNumber(latestByStudent.map((attempt) => attempt.duration_seconds || attempt.latest_duration_seconds).filter(Boolean));
+  const weakQuestionCount = questionStats.filter((item) => item.total && item.rate < 50).length;
+  const tags = commonErrorTags(questionStats);
+  const participantNames = [...new Set(taskAttempts.map((attempt) => attempt.student_name).filter(Boolean))];
+  const studentRows = participantNames.map((studentName) => {
+    const student = activeClassStudents.find((item) => normalizeAnswer(item.student_name) === normalizeAnswer(studentName)) || { student_name: studentName };
+    const studentAttempts = taskAttempts.filter((attempt) => normalizeAnswer(attempt.student_name) === normalizeAnswer(studentName));
+    const latestAttempt = latestAttemptForStudent(taskAttempts, studentName);
+    return { student, studentAttempts, latestAttempt };
+  }).sort((a, b) => {
+    if (state.analyticsStudentSort === "accuracy") {
+      const aRate = a.latestAttempt ? Number(a.latestAttempt.accuracy || 0) : -1;
+      const bRate = b.latestAttempt ? Number(b.latestAttempt.accuracy || 0) : -1;
+      if (bRate !== aRate) return bRate - aRate;
+    }
+    return String(a.student.student_name || "").localeCompare(String(b.student.student_name || ""), "zh-Hans-CN", {
+      numeric: true,
+      sensitivity: "base",
+    });
+  });
+  return `
+    <div class="analytics-task-detail stack">
+      <div class="metric-row task-metrics">
+        <div class="metric"><span class="muted">班级准确率</span><strong>${classAverageAccuracy === null ? "暂无" : `${classAverageAccuracy}%`}</strong></div>
+        <div class="metric"><span class="muted">平均用时</span><strong>${classAverageDuration === null ? "暂无" : formatDuration(classAverageDuration)}</strong></div>
+        <div class="metric"><span class="muted">未掌握内容</span><strong>${weakQuestionCount}</strong></div>
+        <div class="metric error-tag-metric"><span class="muted">常见错误点</span><strong>${escapeHtml(tags.length ? tags.join("；") : "暂无")}</strong></div>
+      </div>
+      <div class="analytics-table-head">
+        <h3>学生完成记录 / 最近得分</h3>
+        <div class="segmented-control" aria-label="学生排序">
+          <button class="secondary compact ${state.analyticsStudentSort === "name" ? "active" : ""}" data-action="sort-analytics-students" data-sort="name">按姓名排序</button>
+          <button class="secondary compact ${state.analyticsStudentSort === "accuracy" ? "active" : ""}" data-action="sort-analytics-students" data-sort="accuracy">按准确率排序</button>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>学生</th><th>最近成绩</th><th>正确率</th><th>提交次数</th><th>答题用时</th><th>更新时间</th><th>查看详情</th></tr></thead>
+          <tbody>
+            ${studentRows.length ? studentRows.map(({ student, studentAttempts, latestAttempt }) => {
+              const isSelectedStudent = normalizeAnswer(state.analyticsStudentName) === normalizeAnswer(student.student_name);
+              return `
+                <tr>
+                  <td>${escapeHtml(student.student_name)}</td>
+                  <td>${latestAttempt ? `${escapeHtml(latestAttempt.score)} / ${escapeHtml(latestAttempt.max_score)}` : "暂无"}</td>
+                  <td>${latestAttempt ? accuracyText(latestAttempt.accuracy) : "暂无"}</td>
+                  <td>${studentAttempts.length}</td>
+                  <td>${latestAttempt ? formatDuration(latestAttempt.duration_seconds || latestAttempt.latest_duration_seconds) : "未完成"}</td>
+                  <td>${latestAttempt?.submitted_at ? new Date(latestAttempt.submitted_at).toLocaleString() : "暂无"}</td>
+                  <td><button class="secondary compact" data-action="select-analytics-student" data-student="${escapeHtml(student.student_name)}">${isSelectedStudent ? "收起 / Hide" : "查看 / View"}</button></td>
+                </tr>
+              `;
+            }).join("") : `<tr><td colspan="7">当前任务还没有学生提交。</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      ${selectedAttempt ? `
+        <div class="student-detail stack">
+          <div class="row wrap">
+            <h3 style="flex: 1">${escapeHtml(state.analyticsStudentName)} 的做题详情</h3>
+            <span class="pill">${escapeHtml(selectedAttempt.score)} / ${escapeHtml(selectedAttempt.max_score)} · ${escapeHtml(selectedAttempt.accuracy)}%</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>题目</th><th>题型</th><th>学生答案</th><th>结果</th><th>老师复判</th></tr></thead>
+              <tbody>
+                ${taskQuestions.map((question) => {
+                  const row = selectedAnswers.find((answer) => answer.question_id === question.id);
+                  const isWrong = row && row.is_correct === false;
+                  return `
+                    <tr class="${isWrong ? "answer-wrong" : ""}">
+                      <td>${escapeHtml(question.prompt)}</td>
+                      <td>${escapeHtml(question.type)}</td>
+                      <td>${renderTeacherAnswerValue(row?.student_answer)}</td>
+                      <td>${!row ? "未作答" : row.is_correct === null ? "开放题" : row.is_correct ? "做对" : "做错"}</td>
+                      <td>${renderTeacherReviewControls(row)}</td>
+                    </tr>
+                  `;
+                }).join("")}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      ` : ""}
+      <h3>班级准确率/错题追踪</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>题目</th><th>题型</th><th>作答</th><th>正确率</th></tr></thead>
+          <tbody>
+            ${questionStats.length ? questionStats.map((item) => `
+              <tr>
+                <td>${escapeHtml(item.question.prompt)}</td>
+                <td>${escapeHtml(item.question.type)}</td>
+                <td>${item.correct}/${item.total}</td>
+                <td>
+                  <div class="progress-cell">
+                    <div class="progress-bar" aria-label="正确率 ${item.rate}%">
+                      <span style="width: ${item.rate}%"></span>
+                    </div>
+                    ${accuracyText(item.rate)}
+                  </div>
+                </td>
+              </tr>
+            `).join("") : `<tr><td colspan="4">这个任务包还没有答题记录。</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+      <div class="row wrap">
+        <h3 style="flex: 1">提交历史</h3>
+        <button class="warning compact" data-action="clear-task-history" data-task="${activeTask.id}" data-class-code="${escapeHtml(activeClass.class_code)}">清空历史记录 / Clear history</button>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>时间</th><th>学生</th><th>得分</th><th>正确率</th><th>答题用时</th></tr></thead>
+          <tbody>
+            ${taskAttempts.length ? taskAttempts.map((attempt) => `
+              <tr>
+                <td>${escapeHtml(attempt.submitted_at ? new Date(attempt.submitted_at).toLocaleString() : "暂无")}</td>
+                <td>${escapeHtml(attempt.student_name)}</td>
+                <td>${escapeHtml(attempt.score)} / ${escapeHtml(attempt.max_score)}</td>
+                <td>${accuracyText(attempt.accuracy)}</td>
+                <td>${formatDuration(attempt.duration_seconds)}</td>
+              </tr>
+            `).join("") : `<tr><td colspan="5">这个任务包还没有提交记录。</td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
 const PINYIN_MAP = {
   水: "shuǐ",
   山: "shān",
@@ -2964,14 +3112,26 @@ function renderAnalytics() {
                       const isTaskOpen = activeTask?.id === task.id;
                       const currentTaskAttempts = classAttempts.filter((attempt) => attempt.task_id === task.id);
                       return `
-                        <button class="task-strip ${isTaskOpen ? "active" : ""}" data-action="select-analytics-task" data-task="${task.id}">
-                          <span><strong>${escapeHtml(task.title)}</strong><small>${escapeHtml(taskMeta(task))}</small></span>
-                          <span>${currentTaskAttempts.length} 次提交</span>
-                        </button>
+                        <div class="task-strip-item">
+                          <button class="task-strip ${isTaskOpen ? "active" : ""}" data-action="select-analytics-task" data-task="${task.id}">
+                            <span><strong>${escapeHtml(task.title)}</strong><small>${escapeHtml(taskMeta(task))}</small></span>
+                            <span>${currentTaskAttempts.length} 次提交</span>
+                          </button>
+                          ${isTaskOpen ? renderAnalyticsTaskDetail({
+                            activeTask,
+                            activeClass,
+                            activeClassStudents,
+                            taskAttempts,
+                            taskQuestions,
+                            questionStats,
+                            selectedAttempt,
+                            selectedAnswers,
+                          }) : ""}
+                        </div>
                       `;
                     }).join("") : `<div class="notice">这个班级还没有已发布任务包。</div>`}
                   </div>
-                  ${activeTask ? `
+                  ${false && activeTask ? `
                     <div class="metric-row task-metrics">
                       ${(() => {
                         const latestByStudent = latestAttemptsByStudent(taskAttempts);
@@ -3830,9 +3990,19 @@ function bindEvents() {
           analyticsStudentSort: element.dataset.sort || "name",
         });
       }
-      if (action === "review-answer") {
+      if (action === "set-review-answer") {
+        state.pendingReviews = {
+          ...(state.pendingReviews || {}),
+          [element.dataset.answer]: element.dataset.correct === "true",
+        };
+        render();
+      }
+      if (action === "save-review-answer") {
         await run(async () => {
-          await api.reviewAnswer(element.dataset.answer, element.dataset.correct === "true");
+          const answerId = element.dataset.answer;
+          if (!Object.prototype.hasOwnProperty.call(state.pendingReviews || {}, answerId)) return;
+          await api.reviewAnswer(answerId, state.pendingReviews[answerId]);
+          delete state.pendingReviews[answerId];
           state.view = "teacher-dashboard";
           state.adminTab = "analytics";
           state.analyticsStudentName = state.analyticsStudentName || element.dataset.student || "";

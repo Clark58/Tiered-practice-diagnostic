@@ -520,27 +520,27 @@ table {
 
 .task-package-table {
   table-layout: fixed;
-  min-width: 980px;
+  min-width: 1080px;
 }
 
 .task-package-table .task-col-title {
-  width: 22%;
+  width: 20%;
 }
 
 .task-package-table .task-col-topic {
-  width: 24%;
+  width: 22%;
 }
 
 .task-package-table .task-col-description {
-  width: 28%;
+  width: 30%;
 }
 
 .task-package-table .task-col-count {
-  width: 10%;
+  width: 8%;
 }
 
 .task-package-table .task-col-actions {
-  width: 16%;
+  width: 20%;
 }
 
 th,
@@ -575,15 +575,15 @@ th {
 
 .task-actions {
   display: grid;
-  grid-template-columns: repeat(3, minmax(50px, max-content));
+  grid-template-columns: 58px 86px 58px;
   align-items: center;
   justify-content: end;
-  gap: 6px;
+  gap: 8px;
   white-space: nowrap;
 }
 
 .task-actions button.compact {
-  min-width: 50px;
+  min-width: 0;
   min-height: 30px;
   padding: 4px 9px;
 }
@@ -907,6 +907,11 @@ th {
   gap: 8px;
 }
 
+.task-strip-item {
+  display: grid;
+  gap: 10px;
+}
+
 .class-strip {
   overflow: hidden;
   border: 1px solid var(--line);
@@ -1157,6 +1162,13 @@ th {
 .task-strip small {
   font-weight: 800;
   opacity: 0.78;
+}
+
+.analytics-task-detail {
+  border: 1px solid rgba(11, 122, 117, 0.18);
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfdfc;
 }
 
 .template-category-grid {
@@ -1527,10 +1539,10 @@ th {
 
 .teacher-review-controls {
   display: grid;
-  grid-template-columns: 1fr repeat(2, max-content);
+  grid-template-columns: minmax(72px, 1fr) repeat(3, 52px);
   align-items: center;
-  gap: 6px;
-  min-width: 168px;
+  gap: 7px;
+  min-width: 250px;
 }
 
 .teacher-review-controls span {
