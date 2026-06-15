@@ -990,6 +990,12 @@ function compactAnswerValue(value) {
   return compactMediaValue(value);
 }
 
+function displayAnswerValue(value) {
+  if (value === "正确") return "正确 / Correct";
+  if (value === "错误") return "错误 / Incorrect";
+  return compactAnswerValue(value);
+}
+
 function compactMediaValue(value) {
   if (isImageValue(value)) return "[图片]";
   if (isAudioValue(value)) return "[录音]";
@@ -1012,14 +1018,37 @@ function renderAudioPlayer(value, label = "录音") {
 }
 
 function answerAudioValue(value) {
+  if (typeof value === "string" && value.trim().startsWith("{")) {
+    try {
+      return answerAudioValue(JSON.parse(value));
+    } catch {
+      return "";
+    }
+  }
   if (value && typeof value === "object" && isAudioValue(value.audio)) return value.audio;
   if (isAudioValue(value)) return value;
   return "";
 }
 
-function renderTeacherAnswerValue(answer) {
+function questionNeedsAudioAnswer(question) {
+  if (!question || !isExpressionTemplate(question.template_id)) return false;
+  const options = getExpressionOptions(question);
+  return (options.answerMode || expressionModes(question.template_id).answerMode) === "audio";
+}
+
+function renderTeacherAnswerValue(answer, question = null) {
   const audio = answerAudioValue(answer);
-  if (audio) return renderAudioPlayer(audio, "学生录音");
+  if (audio) {
+    return `
+      <div class="teacher-audio-answer">
+        <strong>学生录音回答 / Student recording</strong>
+        ${renderAudioPlayer(audio, "播放录音 / Play recording")}
+      </div>
+    `;
+  }
+  if (questionNeedsAudioAnswer(question)) {
+    return `<span class="missing-audio-answer">未提交录音 / No recording submitted</span>`;
+  }
   return escapeHtml(formatAnswerForStudent(answer));
 }
 
@@ -1121,6 +1150,17 @@ function sortTasksByTitle(tasks) {
     numeric: true,
     sensitivity: "base",
   }));
+}
+
+function sortTasksForStudent(tasks) {
+  return [...tasks].sort((a, b) => {
+    const dateDiff = new Date(a.created_at || 0) - new Date(b.created_at || 0);
+    if (dateDiff) return dateDiff;
+    return String(a.title || "").localeCompare(String(b.title || ""), "zh-Hans-CN", {
+      numeric: true,
+      sensitivity: "base",
+    });
+  });
 }
 
 function getTask(taskId) {
@@ -2199,7 +2239,7 @@ function renderAnalyticsTaskDetail({
                     <tr class="${isWrong ? "answer-wrong" : ""}">
                       <td>${escapeHtml(question.prompt)}</td>
                       <td>${escapeHtml(question.type)}</td>
-                      <td>${renderTeacherAnswerValue(row?.student_answer)}${renderTeacherAnswerReviewHint(question, row)}</td>
+                      <td>${renderTeacherAnswerValue(row?.student_answer, question)}${renderTeacherAnswerReviewHint(question, row)}</td>
                       <td>${answerResultLabel(question, row)}</td>
                       <td>${renderTeacherReviewControls(row)}</td>
                     </tr>
@@ -2407,67 +2447,39 @@ function layout(content) {
 function renderHome() {
   const localMode = isLocalPreview() && !getSupabase();
   return layout(`
-    <section class="view">
-      <div class="hero">
-        <div>
-          <h1>${localMode ? "本地试运行 / Local Preview" : "学生登录 / Student Login"}</h1>
-          <p>${localMode ? "当前是内部调试阶段，可直接进入学生练习流程。" : "请输入老师提供的组合代码。Enter the login code from your teacher."}</p>
-        </div>
+    <section class="student-login-page">
+      <div class="student-login-scene" aria-hidden="true">
+        <div class="login-orbit login-orbit--one">声调</div>
+        <div class="login-orbit login-orbit--two">汉字</div>
+        <div class="login-orbit login-orbit--three">表达</div>
       </div>
-      <section class="panel stack">
-        <h2>${localMode ? "进入练习 / Start Preview" : "进入练习 / Student Entry"}</h2>
-        ${localMode ? `
-          <a class="button-link" href="?preview-level=level1" data-action="preview-level" data-level="level1">直接进入 / Enter preview</a>
-          <div class="preview-level-actions">
-            <a class="button-link secondary" href="?preview-level=level1" data-action="preview-level" data-level="level1">
-              <strong>G5</strong>
-              <span>Level 1 / 基础入门</span>
-            </a>
-            <a class="button-link secondary" href="?preview-level=level2" data-action="preview-level" data-level="level2">
-              <strong>G6</strong>
-              <span>Level 2 / 核心表达</span>
-            </a>
-            <a class="button-link secondary" href="?preview-level=level3" data-action="preview-level" data-level="level3">
-              <strong>G7/8</strong>
-              <span>Level 3 / 加速入门</span>
-            </a>
+      <section class="student-login-card">
+        <div class="student-login-brand">
+          <span class="login-kicker">${localMode ? "Local Preview" : "Student Entry"}</span>
+          <h1>轻松开始中文练习</h1>
+          <p>输入班级 code 和姓名，系统会带你进入合适的任务包。Use your class code and name to start your Chinese practice.</p>
+        </div>
+        <div class="student-login-form">
+          <div class="student-login-form__title">
+            <h2>学生登录</h2>
+            <span>Student Login</span>
           </div>
-          <p class="muted local-only-note">本地调试专用：正式版本不会显示这三个入口。</p>
-        ` : `
-          <div class="grid">
-            <label>组合代码 / Login Code
-              <input id="student-login-code" value="${escapeHtml(state.student?.access_code || "")}" placeholder="例如 G7CNKevin" autocomplete="off" />
-            </label>
-          </div>
-          <button data-action="student-login">登录 / Log in</button>
-        `}
+          <label>班级 code / Class code
+            <input id="student-login-class-code" value="${escapeHtml(state.student?.class_code || "")}" placeholder="例如 G5E" autocomplete="off" />
+          </label>
+          <label>学生姓名 / Name
+            <input id="student-login-name" value="${escapeHtml(state.student?.student_name || "")}" placeholder="例如 Kevin" autocomplete="off" />
+          </label>
+          ${localMode ? `<p class="local-login-hint">本地测试：班级 code 输入 G5 / G6 / G7 可直接进入对应 Level。正式版本不会启用。</p>` : ""}
+          <button data-action="student-login">进入练习 / Start</button>
+        </div>
       </section>
     </section>
   `);
 }
 
 function renderLevelSelect() {
-  const assignedLevelId = levelForClassCode(state.student?.class_code);
-  const level = getLevel(assignedLevelId);
-  return layout(`
-    <section class="view">
-      <div class="panel row wrap">
-        <div style="flex: 1">
-          <span class="pill">${escapeHtml(state.student?.class_name || "")}</span>
-          <h2>${escapeHtml(state.student?.student_name || "")} 的学习路径 / Assigned level</h2>
-          <p class="muted">系统已根据班级 code ${escapeHtml(state.student?.class_code || "")} 自动匹配学习路径。</p>
-        </div>
-      </div>
-      <div class="student-level-single">
-        <article class="card student-level-card">
-          <span class="pill level-label">${escapeHtml(level.zh)}</span>
-          <h2 class="level-title">${escapeHtml(level.title)}</h2>
-          <p class="muted">${escapeHtml(level.note)}</p>
-          <button data-action="start-level" data-level="${level.id}">进入 / Enter ${escapeHtml(level.zh)}</button>
-        </article>
-      </div>
-    </section>
-  `);
+  return renderTaskList();
 }
 
 function renderStudentEntry() {
@@ -2480,15 +2492,15 @@ function renderTaskList() {
     class_code: state.student.class_code,
     name: state.student.class_name,
   };
-  const tasks = sortTasksByTitle(state.data.tasks.filter((task) => task.level === state.level && task.status === "published"));
+  const tasks = sortTasksForStudent(state.data.tasks.filter((task) => task.level === state.level && task.status === "published"));
   const level = getLevel(state.level);
   const latestTaskId = latestPublishedTaskIdForLevel(state.data.tasks, state.level);
   return layout(`
     <section class="view">
-      <div class="panel row wrap">
-        <div style="flex: 1">
+      <div class="panel row wrap student-task-header">
+        <div class="student-task-header__text">
           <span class="pill">${escapeHtml(classRow.name)} · ${escapeHtml(level.zh)}</span>
-          <h2>${escapeHtml(state.student.student_name)} 的任务包</h2>
+          <h2>${escapeHtml(state.student.student_name)} 的任务包 / Tasks</h2>
         </div>
       </div>
       <div class="task-list-grid">
@@ -2512,7 +2524,7 @@ function renderTaskList() {
               </div>
             </article>
           `;
-        }).join("") : `<div class="panel muted">这个班级和学习路径下暂时没有已发布任务。</div>`}
+        }).join("") : `<div class="panel muted">这个班级下暂时没有已发布任务。</div>`}
       </div>
     </section>
   `);
@@ -2550,7 +2562,7 @@ function renderQuestion(question) {
             <strong>${escapeHtml(sentence)}</strong>
             <div class="choice-list compact-choice-list">
               ${["正确", "错误"].map((option) => `
-                <button class="choice ${selected[index] === option ? "selected" : ""}" data-action="set-judge-answer" data-question="${question.id}" data-index="${index}" data-value="${escapeHtml(option)}" ${locked ? "disabled" : ""}>${escapeHtml(option)}</button>
+                <button class="choice ${selected[index] === option ? "selected" : ""}" data-action="set-judge-answer" data-question="${question.id}" data-index="${index}" data-value="${escapeHtml(option)}" ${locked ? "disabled" : ""}>${escapeHtml(displayAnswerValue(option))}</button>
               `).join("")}
             </div>
           </div>
@@ -3254,7 +3266,7 @@ function renderAnalytics() {
                                   <tr class="${isWrong ? "answer-wrong" : ""}">
                                     <td>${escapeHtml(question.prompt)}</td>
                                     <td>${escapeHtml(question.type)}</td>
-                                    <td>${renderTeacherAnswerValue(row?.student_answer)}${renderTeacherAnswerReviewHint(question, row)}</td>
+                                    <td>${renderTeacherAnswerValue(row?.student_answer, question)}${renderTeacherAnswerReviewHint(question, row)}</td>
                                     <td>${answerResultLabel(question, row)}</td>
                                     <td>${renderTeacherReviewControls(row)}</td>
                                   </tr>
@@ -3355,13 +3367,13 @@ function formatAnswerForEdit(question) {
 
 function formatAnswerForStudent(value) {
   if (value === null || value === undefined || value === "") return "No answer yet";
-  if (Array.isArray(value)) return value.length ? value.map((item) => compactAnswerValue(typeof item === "object" ? item.word : item)).join(" ") : "No answer yet";
+  if (Array.isArray(value)) return value.length ? value.map((item) => displayAnswerValue(typeof item === "object" ? item.word : item)).join(" ") : "No answer yet";
   if (typeof value === "object") {
     if (value.type === "audio" || value.audio) return value.audio ? "[录音回答]" : "No answer yet";
     const entries = Object.entries(value).filter(([, answer]) => answer);
-    return entries.length ? entries.map(([left, right]) => `${left} → ${compactAnswerValue(right)}`).join("; ") : "No answer yet";
+    return entries.length ? entries.map(([left, right]) => `${left} → ${displayAnswerValue(right)}`).join("; ") : "No answer yet";
   }
-  return String(compactAnswerValue(value));
+  return String(displayAnswerValue(value));
 }
 
 function parseQuestionForm(taskId) {
@@ -3973,12 +3985,25 @@ function bindEvents() {
         render();
       }
       if (action === "student-login") {
-        const loginCode = document.querySelector("#student-login-code").value.trim();
+        const classCode = document.querySelector("#student-login-class-code")?.value.trim() || "";
+        const studentName = document.querySelector("#student-login-name")?.value.trim() || "";
         await run(async () => {
-          if (!loginCode) throw new Error("请输入组合代码。");
-          await api.validateStudent(loginCode, "");
+          const shortcutLevel = {
+            G5: "level1",
+            G6: "level2",
+            G7: "level3",
+            G8: "level3",
+          }[classCode.toUpperCase()];
+          if (isLocalPreview() && !getSupabase() && shortcutLevel && !studentName) {
+            loadLocalPreviewLevel(shortcutLevel);
+            state.view = "task-list";
+            return;
+          }
+          if (!classCode || !studentName) throw new Error("请输入班级 code 和学生姓名。");
+          await api.validateStudent(classCode, studentName);
           state.level = levelForClassCode(state.student?.class_code);
-          state.view = "level-select";
+          await api.loadStudentLevel(state.student.class_code, state.student.student_name, state.level);
+          state.view = "task-list";
         });
       }
       if (action === "student-preview-login") {
@@ -3987,8 +4012,9 @@ function bindEvents() {
           if (!previewStudent) throw new Error("本地演示数据中没有学生。");
           state.student = previewStudent;
           state.level = levelForClassCode(previewStudent.class_code);
-          state.view = "level-select";
           await api.loadAll();
+          await api.loadStudentLevel(previewStudent.class_code, previewStudent.student_name, state.level);
+          state.view = "task-list";
         });
       }
       if (action === "preview-level") {
