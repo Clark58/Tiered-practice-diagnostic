@@ -1300,9 +1300,6 @@ function getAnswerRowsForEdit(question, activeTemplate = null) {
   const templateId = activeTemplate?.id || question.template_id || "";
   const defaultCount = templateId === "grammar_fill_blank_multi" ? 3 : 1;
   if (Array.isArray(question.answerRows) && question.answerRows.length) {
-    if (templateId === "grammar_fill_blank_multi" && !question.id && question.answerRows.length < defaultCount) {
-      return [...question.answerRows, ...Array.from({ length: defaultCount - question.answerRows.length }).map(() => "")];
-    }
     return question.answerRows;
   }
   const rows = formatAnswerForEdit(question).split("\n").filter(Boolean);
