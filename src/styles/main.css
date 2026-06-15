@@ -1411,6 +1411,15 @@ th {
   width: 100%;
 }
 
+.auto-review-hint {
+  display: block;
+  margin-top: 6px;
+  color: #566761;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
 .keyword-distractor-toggle {
   display: flex;
   align-items: center;

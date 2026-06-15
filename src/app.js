@@ -1023,6 +1023,22 @@ function renderTeacherAnswerValue(answer) {
   return escapeHtml(formatAnswerForStudent(answer));
 }
 
+function renderTeacherAnswerReviewHint(question, row) {
+  if (!row || !isOpenQuestion(question)) return "";
+  const result = analyzeOpenResponse(row.student_answer);
+  return `
+    <small class="auto-review-hint">
+      自动建议：${escapeHtml(result.label)} · ${escapeHtml(result.hint)}
+    </small>
+  `;
+}
+
+function answerResultLabel(question, row) {
+  if (!row) return "未作答";
+  if (row.is_correct === null) return isOpenQuestion(question) ? "待老师确认" : "开放题";
+  return row.is_correct ? "做对" : "做错";
+}
+
 function renderTeacherReviewControls(row) {
   if (!row) return "未作答";
   const current = row.is_correct === true ? "当前：做对" : row.is_correct === false ? "当前：做错" : "当前：未复判";
@@ -2158,8 +2174,8 @@ function renderAnalyticsTaskDetail({
                     <tr class="${isWrong ? "answer-wrong" : ""}">
                       <td>${escapeHtml(question.prompt)}</td>
                       <td>${escapeHtml(question.type)}</td>
-                      <td>${renderTeacherAnswerValue(row?.student_answer)}</td>
-                      <td>${!row ? "未作答" : row.is_correct === null ? "开放题" : row.is_correct ? "做对" : "做错"}</td>
+                      <td>${renderTeacherAnswerValue(row?.student_answer)}${renderTeacherAnswerReviewHint(question, row)}</td>
+                      <td>${answerResultLabel(question, row)}</td>
                       <td>${renderTeacherReviewControls(row)}</td>
                     </tr>
                   `;
@@ -2694,6 +2710,8 @@ function renderPractice() {
 function renderSummary() {
   const summary = state.summary;
   const task = getTask(state.selectedTaskId);
+  const scoreText = summary.maxScore ? `${summary.score}/${summary.maxScore}` : summary.openCount ? "Awaiting review" : "0/0";
+  const accuracyTextValue = summary.maxScore ? `${summary.accuracy}%` : summary.openCount ? "Pending" : "0%";
   return layout(`
     <section class="view">
       <div class="panel row wrap">
@@ -2706,11 +2724,11 @@ function renderSummary() {
         <button class="secondary" data-action="task-list">返回任务列表 / Back</button>
       </div>
       <div class="grid">
-        <div class="card"><span class="muted">Score</span><div class="result-number">${summary.score}/${summary.maxScore}</div></div>
-        <div class="card"><span class="muted">Accuracy</span><div class="result-number">${summary.accuracy}%</div></div>
+        <div class="card"><span class="muted">Score</span><div class="result-number">${escapeHtml(scoreText)}</div></div>
+        <div class="card"><span class="muted">Accuracy</span><div class="result-number">${escapeHtml(accuracyTextValue)}</div></div>
         <div class="card"><span class="muted">Completed</span><div class="result-number">${summary.completed}/${summary.total}</div></div>
       </div>
-      ${summary.openCount ? `<div class="notice">Open-response answers received a simple practice score. Your teacher can adjust them later.</div>` : ""}
+      ${summary.openCount ? `<div class="notice">Open-response answers are waiting for teacher review and are not included in the automatic score yet.</div>` : ""}
     </section>
   `);
 }
@@ -3211,8 +3229,8 @@ function renderAnalytics() {
                                   <tr class="${isWrong ? "answer-wrong" : ""}">
                                     <td>${escapeHtml(question.prompt)}</td>
                                     <td>${escapeHtml(question.type)}</td>
-                                    <td>${renderTeacherAnswerValue(row?.student_answer)}</td>
-                                    <td>${!row ? "未作答" : row.is_correct === null ? "开放题" : row.is_correct ? "做对" : "做错"}</td>
+                                    <td>${renderTeacherAnswerValue(row?.student_answer)}${renderTeacherAnswerReviewHint(question, row)}</td>
+                                    <td>${answerResultLabel(question, row)}</td>
                                     <td>${renderTeacherReviewControls(row)}</td>
                                   </tr>
                                 `;
@@ -3467,11 +3485,10 @@ function questionDraftFromForm(overrides = {}) {
 function evaluate(question, answer) {
   if (isOpenQuestion(question)) {
     const result = analyzeOpenResponse(answer);
-    const passed = result.score > 0;
     return {
-      isCorrect: passed,
-      score: result.score,
-      text: `${passed ? "Open response accepted" : "Open response needs revision"}\nYour answer: ${formatAnswerForStudent(answer)}\nScore: ${result.score}/1\nHint: ${result.hint}`,
+      isCorrect: null,
+      score: 0,
+      text: `Teacher review needed\nYour answer: ${formatAnswerForStudent(answer)}\nAuto suggestion: ${result.label}\nReason: ${result.hint}\nThis answer is not counted in the score until your teacher confirms it.`,
     };
   }
   let correct = false;
@@ -3503,33 +3520,59 @@ function evaluate(question, answer) {
 }
 
 function scoreOpenResponse(answer) {
-  return analyzeOpenResponse(answer).score;
+  return analyzeOpenResponse(answer).level === "likely_correct" ? 1 : 0;
 }
 
 function analyzeOpenResponse(answer) {
   if (answer && typeof answer === "object" && answer.audio) {
-    return { score: 1, hint: "Audio answer recorded. Your teacher can review it later." };
+    return {
+      level: "needs_review",
+      label: "Needs teacher review",
+      hint: "Audio answer recorded. Your teacher will listen and confirm the score.",
+    };
   }
   const text = String(answer || "").trim();
-  if (!text) return { score: 0, hint: "Write at least one short Chinese sentence." };
+  if (!text) {
+    return {
+      level: "likely_incomplete",
+      label: "Likely incomplete",
+      hint: "Write at least one short Chinese sentence.",
+    };
+  }
 
   const chars = [...text.replace(/\s+/g, "")];
   const chineseChars = chars.filter((char) => /[\u3400-\u9fff]/.test(char));
   const latinChars = chars.filter((char) => /[A-Za-z]/.test(char));
   if (!chineseChars.length) {
-    return { score: 0, hint: "Please answer in Chinese characters, not English or pinyin only." };
+    return {
+      level: "likely_incomplete",
+      label: "Likely incomplete",
+      hint: "Please answer in Chinese characters, not English or pinyin only.",
+    };
   }
   if (latinChars.length > chineseChars.length / 2) {
-    return { score: 0, hint: "Use mainly Chinese characters. English can only be a small helper, not the main answer." };
+    return {
+      level: "likely_incomplete",
+      label: "Likely incomplete",
+      hint: "Use mainly Chinese characters. English can only be a small helper, not the main answer.",
+    };
   }
   if (chineseChars.length < 4) {
-    return { score: 0, hint: "Write a complete short Chinese sentence, not only one word or a few characters." };
+    return {
+      level: "likely_incomplete",
+      label: "Likely incomplete",
+      hint: "Write a complete short Chinese sentence, not only one word or a few characters.",
+    };
   }
 
   const chineseOnly = chineseChars.join("");
   const uniqueRatio = new Set(chineseChars).size / chineseChars.length;
   if (/(.)\1{2,}/u.test(chineseOnly) || (chineseChars.length >= 6 && uniqueRatio < 0.45)) {
-    return { score: 0, hint: "This does not look like a clear Chinese sentence. Please write a real sentence." };
+    return {
+      level: "likely_incomplete",
+      label: "Likely incomplete",
+      hint: "This does not look like a clear Chinese sentence. Please write a real sentence.",
+    };
   }
 
   const hasSubjectLikeWord = /(我|我们|你|你们|他|她|他们|老师|学生|朋友|同学|家人|妈妈|爸爸|学校|中文|汉语|旅行|旅游|今天|昨天|明天|周末|上午|下午|晚上|这个|那个)/.test(text);
@@ -3538,10 +3581,18 @@ function analyzeOpenResponse(answer) {
   const hasSentencePattern = /(我|我们|你|他|她|老师|学生|朋友|同学|家人|学校|中文|汉语|今天|昨天|明天|周末).{0,12}(是|有|在|去|来|到|看|吃|喝|买|学|喜欢|想|要|会|觉得|玩|做|写|说|听|读|开心|高兴|忙|累)/.test(text);
 
   if (!(hasSubjectLikeWord && hasPredicateLikeWord && (hasSentenceEnding || hasSentencePattern))) {
-    return { score: 0, hint: "Write a clear Chinese sentence with a subject and meaning, for example: 我今天很开心。 or 我去了上海。" };
+    return {
+      level: "needs_review",
+      label: "Needs teacher review",
+      hint: "The answer uses Chinese, but the sentence structure or meaning is not clear enough for automatic confirmation.",
+    };
   }
 
-  return { score: 1, hint: "Your answer looks like a basic Chinese sentence. Your teacher can still adjust the score later." };
+  return {
+    level: "likely_correct",
+    label: "Likely acceptable",
+    hint: "Your answer looks like a basic Chinese sentence. Your teacher still needs to confirm it.",
+  };
 }
 
 function openResponseHint(answer, passed) {
