@@ -2045,6 +2045,20 @@ function truncateText(value, max = 30) {
   return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
+function renderSummaryList(items, emptyText) {
+  if (!items.length) return `<strong class="summary-empty">${escapeHtml(emptyText)}</strong>`;
+  return `
+    <ol class="summary-list">
+      ${items.map((item, index) => `
+        <li>
+          <span>${index + 1}</span>
+          <strong>${escapeHtml(item)}</strong>
+        </li>
+      `).join("")}
+    </ol>
+  `;
+}
+
 function renderAnalyticsSummary(summary) {
   if (!summary) {
     return `<div class="analytics-summary notice">暂无可分析的最新任务。</div>`;
@@ -2059,6 +2073,9 @@ function renderAnalyticsSummary(summary) {
     .slice(0, 3);
   const tags = commonErrorTags(summary.questionStats);
   const status = classStatusSummary(summary.averageAccuracy, summary.latestByStudent);
+  const weakQuestionItems = weakQuestions.map((item) => `${truncateText(item.question.prompt, 24)}（${item.rate}%）`);
+  const weakStudentItems = weakStudents.map((attempt) => `${attempt.student_name}（${attempt.accuracy}%）`);
+  const tagItems = tags.map((tag) => truncateText(tag, 24));
   return `
     <section class="analytics-summary">
       <div class="analytics-summary__head">
@@ -2068,15 +2085,15 @@ function renderAnalyticsSummary(summary) {
       <div class="analytics-summary__grid">
         <div class="summary-card">
           <span>最需要关注的题目</span>
-          <strong>${weakQuestions.length ? weakQuestions.map((item) => `${escapeHtml(truncateText(item.question.prompt))}（${item.rate}%）`).join("<br>") : "暂无错题数据"}</strong>
+          ${renderSummaryList(weakQuestionItems, "暂无错题数据")}
         </div>
         <div class="summary-card">
           <span>最需要关注的学生</span>
-          <strong>${weakStudents.length ? weakStudents.map((attempt) => `${escapeHtml(attempt.student_name)}（${escapeHtml(attempt.accuracy)}%）`).join("<br>") : "暂无提交"}</strong>
+          ${renderSummaryList(weakStudentItems, "暂无提交")}
         </div>
         <div class="summary-card">
           <span>建议复习标签</span>
-          <strong>${tags.length ? tags.map((tag) => `<em>${escapeHtml(tag)}</em>`).join("") : "暂无"}</strong>
+          ${renderSummaryList(tagItems, "暂无")}
         </div>
         <div class="summary-card status-card">
           <span>本班状态</span>

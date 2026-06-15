@@ -1032,15 +1032,47 @@ th {
   line-height: 1.55;
 }
 
-.summary-card em {
-  display: inline-flex;
-  margin: 0 6px 6px 0;
+.summary-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.summary-list li {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.summary-list li > span {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
   border-radius: 999px;
-  padding: 4px 8px;
   color: #0b4d48;
   background: #dff1ec;
-  font-style: normal;
   font-size: 12px;
+  font-weight: 900;
+}
+
+.summary-list li > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-empty {
+  color: var(--ink);
+  font-size: 13px;
 }
 
 .status-card strong {
