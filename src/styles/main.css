@@ -1580,10 +1580,27 @@ th {
 
 .teacher-review-controls {
   display: grid;
-  grid-template-columns: minmax(72px, 1fr) repeat(3, 52px);
+  grid-template-columns: minmax(72px, 1fr) repeat(2, 52px);
   align-items: center;
   gap: 7px;
-  min-width: 250px;
+  min-width: 190px;
+}
+
+.teacher-review-head {
+  display: grid;
+  grid-template-columns: minmax(70px, 1fr) 72px;
+  align-items: center;
+  gap: 8px;
+}
+
+.teacher-review-head span {
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.teacher-review-head button {
+  justify-self: end;
+  min-width: 68px;
 }
 
 .teacher-review-controls span {

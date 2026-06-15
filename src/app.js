@@ -1049,7 +1049,18 @@ function renderTeacherReviewControls(row) {
       <span>${escapeHtml(current)}</span>
       <button class="secondary compact ${staged === true ? "active" : ""}" data-action="set-review-answer" data-answer="${escapeHtml(row.id)}" data-correct="true">判对</button>
       <button class="secondary compact ${staged === false ? "active warning-text" : ""}" data-action="set-review-answer" data-answer="${escapeHtml(row.id)}" data-correct="false">判错</button>
-      <button class="compact" data-action="save-review-answer" data-answer="${escapeHtml(row.id)}" ${hasPending ? "" : "disabled"}>保存</button>
+    </div>
+  `;
+}
+
+function renderTeacherReviewHeader() {
+  const pendingCount = Object.keys(state.pendingReviews || {}).length;
+  return `
+    <div class="teacher-review-head">
+      <span>老师复判</span>
+      <button class="compact" data-action="save-review-answers" ${pendingCount ? "" : "disabled"}>
+        保存${pendingCount ? ` ${pendingCount}` : ""}
+      </button>
     </div>
   `;
 }
@@ -2182,7 +2193,7 @@ function renderAnalyticsTaskDetail({
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>题目</th><th>题型</th><th>学生答案</th><th>结果</th><th>老师复判</th></tr></thead>
+              <thead><tr><th>题目</th><th>题型</th><th>学生答案</th><th>结果</th><th>${renderTeacherReviewHeader()}</th></tr></thead>
               <tbody>
                 ${taskQuestions.map((question) => {
                   const row = selectedAnswers.find((answer) => answer.question_id === question.id);
@@ -3237,7 +3248,7 @@ function renderAnalytics() {
                         </div>
                         <div class="table-wrap">
                           <table>
-                            <thead><tr><th>题目</th><th>题型</th><th>学生答案</th><th>结果</th><th>老师复判</th></tr></thead>
+                            <thead><tr><th>题目</th><th>题型</th><th>学生答案</th><th>结果</th><th>${renderTeacherReviewHeader()}</th></tr></thead>
                             <tbody>
                               ${taskQuestions.map((question) => {
                                 const row = selectedAnswers.find((answer) => answer.question_id === question.id);
@@ -4065,12 +4076,14 @@ function bindEvents() {
         };
         render();
       }
-      if (action === "save-review-answer") {
+      if (action === "save-review-answers") {
         await run(async () => {
-          const answerId = element.dataset.answer;
-          if (!Object.prototype.hasOwnProperty.call(state.pendingReviews || {}, answerId)) return;
-          await api.reviewAnswer(answerId, state.pendingReviews[answerId]);
-          delete state.pendingReviews[answerId];
+          const entries = Object.entries(state.pendingReviews || {});
+          if (!entries.length) return;
+          for (const [answerId, isCorrect] of entries) {
+            await api.reviewAnswer(answerId, isCorrect);
+          }
+          state.pendingReviews = {};
           state.view = "teacher-dashboard";
           state.adminTab = "analytics";
           state.analyticsStudentName = state.analyticsStudentName || element.dataset.student || "";
