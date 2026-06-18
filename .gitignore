@@ -5,6 +5,8 @@ dist/
 .DS_Store
 *.log
 .vercel
+.wrangler/
+cloudflare/.wrangler/
 .env
 .env.local
 .env.*.local

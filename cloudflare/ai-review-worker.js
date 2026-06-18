@@ -182,12 +182,16 @@ async function requestReview({ baseUrl, apiKey, model, messages, maxTokens, time
     ok: response.ok,
     status: response.status,
     json,
-    message: json?.error?.message || `AI review request failed with status ${response.status}.`,
+    message: json?.error?.message
+      || (response.status === 401 || response.status === 403
+        ? "DeepSeek rejected the API key. Create a new full API key and save it as the Worker secret."
+        : `AI review request failed with status ${response.status}.`),
   };
 }
 
 async function handleReview(request, env) {
-  const apiKey = env.AI_REVIEW_API_KEY || env.DEEPSEEK_API_KEY || request.headers.get("x-ai-review-key") || "";
+  const browserKey = request.headers.get("x-ai-review-key") || "";
+  const apiKey = browserKey || env.AI_REVIEW_API_KEY || env.DEEPSEEK_API_KEY || "";
   if (!apiKey) {
     return jsonResponse({
       configured: false,

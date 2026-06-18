@@ -12,7 +12,7 @@
     "AI_REVIEW_TIMEOUT_SECONDS": "25",
     "AI_TRANSCRIBE_BASE_URL": "https://api.openai.com/v1",
     "AI_TRANSCRIBE_MODEL": "whisper-1",
-    "ALLOWED_ORIGINS": "https://clark58.github.io,http://127.0.0.1:4174,http://127.0.0.1:4175,http://localhost:4174"
+    "ALLOWED_ORIGINS": "https://dg.eduactor.com,https://clark58.github.io,http://127.0.0.1:4174,http://127.0.0.1:4175,http://localhost:4174"
   },
   "observability": {
     "enabled": true,

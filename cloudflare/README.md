@@ -1,8 +1,28 @@
-# Cloudflare AI Review Proxy
+# Cloudflare deployment
 
-This Worker lets the GitHub Pages frontend call DeepSeek without exposing the API key in browser code.
+This project uses two Cloudflare pieces:
 
-## Deploy
+- Cloudflare Pages hosts the teacher/student website at `https://dg.eduactor.com`.
+- Cloudflare Workers hosts the AI review proxy so DeepSeek keys are not exposed in browser code.
+
+## Frontend: Cloudflare Pages
+
+Build output is the repository root static app. If you deploy from the dashboard, use:
+
+- Framework preset: `None`
+- Build command: leave empty
+- Build output directory: `/`
+
+If you deploy with Wrangler after login:
+
+```bash
+npx wrangler pages project create chinese-tiered-diagnostic
+npx wrangler pages deploy . --project-name chinese-tiered-diagnostic --branch main
+```
+
+After the Pages project exists, add the custom domain `dg.eduactor.com` in Cloudflare Pages. Keep the AI proxy URL in the teacher dashboard pointed at the Worker URL described below.
+
+## AI Review Worker
 
 ```bash
 cd cloudflare

@@ -189,6 +189,7 @@ const QUESTION_TEMPLATES = [
 
 const STORAGE_KEY = "chinese-tiered-practice-mvp";
 const CONFIG_KEY = "chinese-tiered-practice-supabase";
+const DEFAULT_AI_PROXY_URL = "https://tiered-practice-ai-review.usochino.workers.dev";
 const DEFAULT_CONFIG = {
   url: "",
   anonKey: "",
@@ -3133,7 +3134,7 @@ function renderAiConfigBlock() {
         ${aiStatusText()}
       </div>
       <label>AI API 代理地址 / AI API proxy URL
-        <input id="config-ai-api-base-url" value="${escapeHtml(state.config.aiApiBaseUrl || "")}" placeholder="GitHub Pages 必填：Cloudflare Worker 或其他后端地址" />
+        <input id="config-ai-api-base-url" value="${escapeHtml(state.config.aiApiBaseUrl || (shouldUseDefaultAiProxy() ? DEFAULT_AI_PROXY_URL : ""))}" placeholder="Cloudflare Worker 或其他后端地址" />
       </label>
       <div class="grid">
         <label>DeepSeek API 地址 / DeepSeek API base URL
@@ -4007,7 +4008,9 @@ function currentAiApiKey() {
 
 function currentAiApiBaseUrl() {
   const fieldValue = document.querySelector("#config-ai-api-base-url")?.value?.trim();
-  return fieldValue || String(state.config?.aiApiBaseUrl || "").trim();
+  const savedValue = String(state.config?.aiApiBaseUrl || "").trim();
+  if (fieldValue || savedValue) return fieldValue || savedValue;
+  return shouldUseDefaultAiProxy() ? DEFAULT_AI_PROXY_URL : "";
 }
 
 function currentAiReviewBaseUrl() {
@@ -4052,7 +4055,14 @@ function isLocalPreviewHost() {
 
 function isStaticDeployedHost() {
   const host = window.location.hostname;
-  return host.endsWith("github.io") || host.endsWith("pages.dev") || host.endsWith("netlify.app") || host.endsWith("vercel.app");
+  return host.endsWith("github.io") || host.endsWith("pages.dev") || host.endsWith("netlify.app") || host.endsWith("vercel.app") || host === "dg.eduactor.com";
+}
+
+function shouldUseDefaultAiProxy() {
+  const host = window.location.hostname;
+  return host === "dg.eduactor.com"
+    || host === "chinese-tiered-diagnostic.pages.dev"
+    || host.endsWith(".chinese-tiered-diagnostic.pages.dev");
 }
 
 function aiProxyRequiredMessage() {

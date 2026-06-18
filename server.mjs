@@ -211,7 +211,8 @@ async function requestAiReview({ baseUrl, apiKey, model, messages, maxTokens, ti
 }
 
 async function handleAiReview(req, res) {
-  const apiKey = process.env.AI_REVIEW_API_KEY || process.env.DEEPSEEK_API_KEY || String(req.headers["x-ai-review-key"] || "");
+  const browserKey = String(req.headers["x-ai-review-key"] || "");
+  const apiKey = browserKey || process.env.AI_REVIEW_API_KEY || process.env.DEEPSEEK_API_KEY || "";
   if (!apiKey) {
     sendJson(res, 503, {
       configured: false,
