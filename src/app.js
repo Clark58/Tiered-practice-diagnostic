@@ -3133,7 +3133,7 @@ function renderAiConfigBlock() {
         ${aiStatusText()}
       </div>
       <label>AI API 代理地址 / AI API proxy URL
-        <input id="config-ai-api-base-url" value="${escapeHtml(state.config.aiApiBaseUrl || "")}" placeholder="本地留空；正式站填写 Cloudflare Worker 或其他后端地址" />
+        <input id="config-ai-api-base-url" value="${escapeHtml(state.config.aiApiBaseUrl || "")}" placeholder="GitHub Pages 必填：Cloudflare Worker 或其他后端地址" />
       </label>
       <div class="grid">
         <label>DeepSeek API 地址 / DeepSeek API base URL
@@ -3163,7 +3163,7 @@ function renderAiConfigBlock() {
         <span class="${hasBrowserKey ? "pill live" : "pill"}">${hasBrowserKey ? "已保存本机 key / local key saved" : "未保存本机 key / no local key"}</span>
         <button type="button" class="secondary compact" data-action="clear-ai-api-key">删除本机 key</button>
       </div>
-      <p class="muted">正式部署：推荐把 <code>DEEPSEEK_API_KEY</code> 存为 Cloudflare Worker Secret。这里的 key 只保存在当前浏览器，便于你个人调试和更换；静态网页无法把浏览器里的 key 做到真正保密。</p>
+      <p class="muted">正式部署：GitHub Pages 是静态网页，不能直接运行 <code>/api/ai-review</code>。请部署 Cloudflare Worker，把 Worker URL 填入上方代理地址；推荐把 <code>DEEPSEEK_API_KEY</code> 存为 Worker Secret。这里的浏览器 key 只适合你个人调试和更换。</p>
       <p class="muted">本地测试：也可以在 <code>.env.local</code> 设置 <code>DEEPSEEK_API_KEY</code> 或 <code>AI_REVIEW_API_KEY</code> 后重启预览服务器。录音类答案当前由老师复判，不调用语音转文字。</p>
     </div>
   `;
@@ -4045,8 +4045,30 @@ function aiReviewConfigPayload() {
   };
 }
 
+function isLocalPreviewHost() {
+  const host = window.location.hostname;
+  return host === "localhost" || host === "127.0.0.1" || host === "";
+}
+
+function isStaticDeployedHost() {
+  const host = window.location.hostname;
+  return host.endsWith("github.io") || host.endsWith("pages.dev") || host.endsWith("netlify.app") || host.endsWith("vercel.app");
+}
+
+function aiProxyRequiredMessage() {
+  return [
+    "GitHub Pages is a static site and cannot run /api/ai-status or /api/ai-review.",
+    "Please deploy the Cloudflare Worker, paste its URL into AI API proxy URL, then test again.",
+  ].join(" ");
+}
+
 async function postJson(path, payload) {
   const apiBaseUrl = currentAiApiBaseUrl().replace(/\/$/, "");
+  if (path.startsWith("/api/ai-") && !apiBaseUrl && !isLocalPreviewHost() && isStaticDeployedHost()) {
+    const error = new Error(aiProxyRequiredMessage());
+    error.aiConfigured = false;
+    throw error;
+  }
   const url = apiBaseUrl && path.startsWith("/api/ai-") ? `${apiBaseUrl}${path}` : path;
   const aiApiKey = currentAiApiKey();
   const headers = { "content-type": "application/json" };
@@ -4061,7 +4083,9 @@ async function postJson(path, payload) {
   try {
     data = text ? JSON.parse(text) : null;
   } catch {
-    throw new Error("AI service returned an unreadable response.");
+    const contentType = response.headers.get("content-type") || "unknown content type";
+    const preview = text.replace(/\s+/g, " ").slice(0, 120);
+    throw new Error(`AI service returned non-JSON response from ${url} (${response.status}, ${contentType}). ${preview ? `Preview: ${preview}` : ""}`);
   }
   if (!response.ok) {
     const error = new Error(data?.message || `AI service failed with status ${response.status}.`);
