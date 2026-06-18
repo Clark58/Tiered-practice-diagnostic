@@ -189,6 +189,18 @@ const QUESTION_TEMPLATES = [
 
 const STORAGE_KEY = "chinese-tiered-practice-mvp";
 const CONFIG_KEY = "chinese-tiered-practice-supabase";
+const DEFAULT_CONFIG = {
+  url: "",
+  anonKey: "",
+  aiReviewEnabled: false,
+  aiApiBaseUrl: "",
+  aiApiKey: "",
+  aiReviewBaseUrl: "https://api.deepseek.com",
+  aiReviewModel: "deepseek-v4-pro",
+  aiReviewReasoningEffort: "high",
+  aiReviewMaxTokens: 320,
+  aiReviewTimeoutSeconds: 25,
+};
 
 const state = {
   view: "home",
@@ -218,22 +230,24 @@ const state = {
   message: "",
   loading: false,
   config: loadConfig(),
+  aiStatus: null,
   recording: null,
+  aiPending: {},
 };
 
 let supabaseClient = null;
 
 function loadConfig() {
   try {
-    return JSON.parse(localStorage.getItem(CONFIG_KEY)) || { url: "", anonKey: "" };
+    return { ...DEFAULT_CONFIG, ...(JSON.parse(localStorage.getItem(CONFIG_KEY)) || {}) };
   } catch {
-    return { url: "", anonKey: "" };
+    return { ...DEFAULT_CONFIG };
   }
 }
 
 function saveConfig(config) {
-  state.config = config;
-  localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+  state.config = { ...DEFAULT_CONFIG, ...config };
+  localStorage.setItem(CONFIG_KEY, JSON.stringify(state.config));
   supabaseClient = null;
 }
 
@@ -720,9 +734,9 @@ const localApi = {
     state.data = data;
     return attemptId;
   },
-  async reviewAnswer(answerId, isCorrect) {
+  async reviewAnswer(answerId, reviewInput) {
     const data = loadLocalData();
-    recalculateReviewedAnswer(data, answerId, isCorrect);
+    recalculateReviewedAnswer(data, answerId, reviewInput);
     saveLocalData(data);
     state.data = data;
   },
@@ -935,14 +949,23 @@ const supabaseApi = {
     if (scoreResult.error) throw scoreResult.error;
     return attemptId;
   },
-  async reviewAnswer(answerId, isCorrect) {
+  async reviewAnswer(answerId, reviewInput) {
     const client = getSupabase();
-    if (!client) return localApi.reviewAnswer(answerId, isCorrect);
+    if (!client) return localApi.reviewAnswer(answerId, reviewInput);
     const data = structuredClone(state.data || { student_attempts: [], student_answers: [], student_task_scores: [] });
-    const review = recalculateReviewedAnswer(data, answerId, isCorrect);
+    const review = recalculateReviewedAnswer(data, answerId, reviewInput);
     const answerResult = await client
       .from("student_answers")
-      .update({ is_correct: review.answer.is_correct, score: review.answer.score })
+      .update({
+        is_correct: review.answer.is_correct,
+        score: review.answer.score,
+        final_score: review.answer.final_score,
+        teacher_final_result: review.answer.teacher_final_result,
+        teacher_feedback: review.answer.teacher_feedback,
+        teacher_reviewed_at: review.answer.teacher_reviewed_at,
+        teacher_reviewed_by: review.answer.teacher_reviewed_by,
+        review_status: review.answer.review_status,
+      })
       .eq("id", answerId);
     if (answerResult.error) throw answerResult.error;
     const attemptResult = await client
@@ -1064,20 +1087,39 @@ function renderTeacherAnswerReviewHint(question, row) {
 
 function answerResultLabel(question, row) {
   if (!row) return "未作答";
-  if (row.is_correct === null) return isOpenQuestion(question) ? "待老师确认" : "开放题";
-  return row.is_correct ? "做对" : "做错";
+  const status = finalResultForAnswer(row);
+  if (status === "correct") return "做对 / Correct";
+  if (status === "partial") return "部分正确 / Partial";
+  if (status === "incorrect") return "做错 / Incorrect";
+  return "待老师确认 / Pending";
 }
 
 function renderTeacherReviewControls(row) {
   if (!row) return "未作答";
-  const current = row.is_correct === true ? "当前：做对" : row.is_correct === false ? "当前：做错" : "当前：未复判";
-  const hasPending = Object.prototype.hasOwnProperty.call(state.pendingReviews || {}, row.id);
-  const staged = hasPending ? state.pendingReviews[row.id] : row.is_correct;
+  const currentResult = finalResultForAnswer(row);
+  const pendingReview = (state.pendingReviews || {})[row.id] || {};
+  const staged = normalizeResultStatus(pendingReview.result) || currentResult;
+  const feedback = Object.prototype.hasOwnProperty.call(pendingReview, "feedback")
+    ? pendingReview.feedback
+    : (row.teacher_feedback || "");
+  const quickOptions = Object.entries(TEACHER_QUICK_FEEDBACK).flatMap(([status, items]) => (
+    items.map((text) => ({ status, text }))
+  ));
   return `
     <div class="teacher-review-controls">
-      <span>${escapeHtml(current)}</span>
-      <button class="secondary compact ${staged === true ? "active" : ""}" data-action="set-review-answer" data-answer="${escapeHtml(row.id)}" data-correct="true">判对</button>
-      <button class="secondary compact ${staged === false ? "active warning-text" : ""}" data-action="set-review-answer" data-answer="${escapeHtml(row.id)}" data-correct="false">判错</button>
+      <span>当前：${escapeHtml(RESULT_LABELS[currentResult] || "Pending Teacher Review")}</span>
+      <div class="row wrap teacher-review-buttons">
+        <button class="secondary compact ${staged === "correct" ? "active" : ""}" data-action="set-review-answer" data-answer="${escapeHtml(row.id)}" data-result="correct">正确</button>
+        <button class="secondary compact ${staged === "partial" ? "active" : ""}" data-action="set-review-answer" data-answer="${escapeHtml(row.id)}" data-result="partial">部分</button>
+        <button class="secondary compact ${staged === "incorrect" ? "active warning-text" : ""}" data-action="set-review-answer" data-answer="${escapeHtml(row.id)}" data-result="incorrect">错误</button>
+      </div>
+      <select class="teacher-feedback-quick" data-review-quick="${escapeHtml(row.id)}">
+        <option value="">快速反馈 / Quick feedback</option>
+        ${quickOptions.map((item) => `
+          <option value="${escapeHtml(item.text)}">${escapeHtml(RESULT_LABELS[item.status])}: ${escapeHtml(item.text)}</option>
+        `).join("")}
+      </select>
+      <textarea class="teacher-feedback-input" data-review-feedback="${escapeHtml(row.id)}" placeholder="Teacher feedback for this answer">${escapeHtml(feedback)}</textarea>
     </div>
   `;
 }
@@ -1087,7 +1129,7 @@ function renderTeacherReviewHeader() {
   return `
     <div class="teacher-review-head">
       <span>老师复判</span>
-      <button class="compact" data-action="save-review-answers" ${pendingCount ? "" : "disabled"}>
+      <button class="compact" data-action="save-review-answers">
         保存${pendingCount ? ` ${pendingCount}` : ""}
       </button>
     </div>
@@ -1763,21 +1805,211 @@ function averageNumber(values) {
   return Math.round(clean.reduce((sum, value) => sum + value, 0) / clean.length);
 }
 
-function recalculateReviewedAnswer(data, answerId, isCorrect) {
+function formatScoreValue(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "0";
+  return Number.isInteger(number) ? String(number) : number.toFixed(1).replace(/\.0$/, "");
+}
+
+function levelFromPercent(percent) {
+  const value = Number(percent);
+  if (!Number.isFinite(value)) return null;
+  if (value >= 90) return 7;
+  if (value >= 80) return 6;
+  if (value >= 70) return 5;
+  if (value >= 60) return 4;
+  if (value >= 50) return 3;
+  if (value >= 40) return 2;
+  return 1;
+}
+
+const CATEGORY_META = [
+  { id: "vocabulary", label: "Vocabulary / Recognition" },
+  { id: "grammar", label: "Grammar / Sentence Control" },
+  { id: "sentence_building", label: "Sentence Building / Ordering" },
+  { id: "expression", label: "Speaking / Open Response" },
+];
+
+const RESULT_LABELS = {
+  correct: "Correct",
+  partial: "Partially Correct",
+  incorrect: "Incorrect",
+  pending_teacher_review: "Pending Teacher Review",
+};
+
+function normalizeResultStatus(value) {
+  const status = String(value || "").trim();
+  if (status === "correct") return "correct";
+  if (status === "partial" || status === "partially_correct") return "partial";
+  if (status === "incorrect") return "incorrect";
+  if (status === "needs_review" || status === "pending" || status === "pending_teacher_review") return "pending_teacher_review";
+  return "";
+}
+
+function legacyResultFromAnswer(answer) {
+  if (!answer) return "pending_teacher_review";
+  if (answer.is_correct === true) return "correct";
+  if (answer.is_correct === false) {
+    const score = Number(answer.score || 0);
+    if (score > 0 && score < 1) return "partial";
+    return "incorrect";
+  }
+  return "pending_teacher_review";
+}
+
+function finalResultForAnswer(answer) {
+  if (!answer) return "pending_teacher_review";
+  return normalizeResultStatus(answer.teacher_final_result)
+    || normalizeResultStatus(answer.ai_result)
+    || normalizeResultStatus(answer.auto_result)
+    || legacyResultFromAnswer(answer);
+}
+
+function finalFeedbackForAnswer(answer) {
+  if (!answer) return "";
+  return answer.teacher_feedback || answer.ai_feedback || answer.auto_feedback || "";
+}
+
+function scoreForResult(status) {
+  const normalized = normalizeResultStatus(status);
+  if (normalized === "correct") return 1;
+  if (normalized === "partial") return 0.5;
+  if (normalized === "incorrect") return 0;
+  return null;
+}
+
+function finalScoreForAnswer(answer) {
+  if (!answer) return null;
+  if (Number.isFinite(Number(answer.final_score)) && finalResultForAnswer(answer) !== "pending_teacher_review") {
+    return Number(answer.final_score);
+  }
+  if (answer.teacher_final_result) return scoreForResult(answer.teacher_final_result);
+  if (answer.ai_result) return scoreForResult(answer.ai_result);
+  if (answer.auto_result) return scoreForResult(answer.auto_result);
+  const status = legacyResultFromAnswer(answer);
+  if (status === "partial" && Number.isFinite(Number(answer.score))) return Number(answer.score);
+  return scoreForResult(status);
+}
+
+function reviewStatusForAnswer(answer) {
+  if (!answer) return "pending_teacher_review";
+  if (answer.review_status) return String(answer.review_status);
+  if (answer.teacher_final_result) return "teacher_reviewed";
+  if (answer.ai_result) return "ai_reviewed";
+  if (answer.auto_result) return "auto_reviewed";
+  return finalResultForAnswer(answer) === "pending_teacher_review" ? "pending_teacher_review" : "auto_reviewed";
+}
+
+function attemptScoreFromAnswers(answers) {
+  const validScores = answers
+    .map((answer) => finalScoreForAnswer(answer))
+    .filter((score) => Number.isFinite(score));
+  const score = validScores.reduce((sum, value) => sum + value, 0);
+  const maxScore = validScores.length;
+  return {
+    score,
+    maxScore,
+    accuracy: maxScore ? Math.round((score / maxScore) * 100) : 0,
+    pendingCount: answers.length - maxScore,
+  };
+}
+
+function categoryForQuestion(question) {
+  if (!question) return "vocabulary";
+  return getTemplate(question.template_id)?.category || categoryForQuestionType(question.template_id || question.type);
+}
+
+function categoryScoresForAnswers(taskQuestions, taskAnswers) {
+  const byQuestion = new Map(taskAnswers.map((answer) => [answer.question_id, answer]));
+  const rows = CATEGORY_META.map((category) => {
+    const questions = taskQuestions.filter((question) => categoryForQuestion(question) === category.id);
+    const answers = questions.map((question) => byQuestion.get(question.id)).filter(Boolean);
+    const summary = attemptScoreFromAnswers(answers);
+    return {
+      ...category,
+      score: summary.score,
+      maxScore: summary.maxScore,
+      accuracy: summary.maxScore ? summary.accuracy : null,
+      pendingCount: summary.pendingCount,
+      total: questions.length,
+    };
+  });
+  const valid = rows.filter((row) => row.maxScore > 0);
+  const overall = valid.length
+    ? Math.round(valid.reduce((sum, row) => sum + row.accuracy, 0) / valid.length)
+    : null;
+  return {
+    rows,
+    overall,
+    level: overall === null ? null : levelFromPercent(overall),
+    validCategoryCount: valid.length,
+    pendingCount: rows.reduce((sum, row) => sum + row.pendingCount, 0),
+  };
+}
+
+function reviewStatusCounts(answers) {
+  return answers.reduce((counts, answer) => {
+    const status = reviewStatusForAnswer(answer);
+    if (status === "teacher_reviewed") counts.teacher += 1;
+    else if (status === "pending_teacher_review") counts.pending += 1;
+    else counts.auto += 1;
+    return counts;
+  }, { auto: 0, teacher: 0, pending: 0 });
+}
+
+const TEACHER_QUICK_FEEDBACK = {
+  correct: [
+    "Excellent work.",
+    "Good effort.",
+    "Good pronunciation.",
+    "Good fluency.",
+    "Good vocabulary selection.",
+    "Good task completion.",
+    "This answer matches the task well.",
+  ],
+  partial: [
+    "Partly correct. Check the missing word or word order.",
+    "You have the main idea, but one detail needs correction.",
+    "Try to use more complete sentences.",
+    "Add more details.",
+    "Answer the full question.",
+    "Please review this grammar point.",
+  ],
+  incorrect: [
+    "Review the key word and try again.",
+    "This answer does not match the prompt yet. Check the model answer.",
+    "Pay attention to pronunciation.",
+    "Pay attention to tones.",
+    "Improve fluency.",
+    "Use more accurate vocabulary.",
+    "Check sentence structure.",
+    "Please practice this again.",
+  ],
+};
+
+function recalculateReviewedAnswer(data, answerId, reviewInput) {
   const answer = data.student_answers.find((item) => item.id === answerId);
   if (!answer) throw new Error("没有找到这条学生答案。");
   const attempt = data.student_attempts.find((item) => item.id === answer.attempt_id);
   if (!attempt) throw new Error("没有找到这次提交记录。");
-  answer.is_correct = Boolean(isCorrect);
-  answer.score = answer.is_correct ? 1 : 0;
+  const finalResult = normalizeResultStatus(
+    typeof reviewInput === "object" ? reviewInput.result : (reviewInput ? "correct" : "incorrect"),
+  ) || "incorrect";
+  const finalScore = scoreForResult(finalResult) ?? 0;
+  answer.teacher_final_result = finalResult;
+  answer.teacher_feedback = typeof reviewInput === "object" ? String(reviewInput.feedback || "").trim() : (answer.teacher_feedback || "");
+  answer.teacher_reviewed_at = new Date().toISOString();
+  answer.teacher_reviewed_by = state.teacher?.email || "teacher";
+  answer.review_status = "teacher_reviewed";
+  answer.final_score = finalScore;
+  answer.is_correct = finalResult === "correct" ? true : finalResult === "incorrect" ? false : false;
+  answer.score = finalScore;
 
   const attemptAnswers = data.student_answers.filter((item) => item.attempt_id === attempt.id);
-  const scoredAnswers = attemptAnswers.filter((item) => item.is_correct !== null && item.is_correct !== undefined);
-  const score = scoredAnswers.reduce((sum, item) => sum + Number(item.score || 0), 0);
-  const maxScore = scoredAnswers.length;
-  attempt.score = score;
-  attempt.max_score = maxScore;
-  attempt.accuracy = maxScore ? Math.round((score / maxScore) * 100) : 0;
+  const scoreSummary = attemptScoreFromAnswers(attemptAnswers);
+  attempt.score = scoreSummary.score;
+  attempt.max_score = scoreSummary.maxScore;
+  attempt.accuracy = scoreSummary.accuracy;
 
   const sameAttempts = data.student_attempts
     .filter((item) => (
@@ -1963,18 +2195,24 @@ function seedDiverseLocalAttempts() {
         const answers = questions.map((question, questionIndex) => {
           const studentAnswer = demoStudentAnswer(question, classIndex + taskIndex + studentIndex + questionIndex);
           const result = evaluate(question, studentAnswer);
+          const resultStatus = normalizeResultStatus(result.status)
+            || (result.isCorrect === true ? "correct" : result.isCorrect === false ? "incorrect" : "pending_teacher_review");
+          const finalScore = scoreForResult(resultStatus);
           return {
             id: crypto.randomUUID(),
             question_id: question.id,
             question_type: question.type,
             student_answer: studentAnswer,
             is_correct: result.isCorrect,
-            score: result.score,
+            score: finalScore ?? 0,
+            final_score: finalScore ?? 0,
+            auto_result: resultStatus,
+            auto_feedback: result.text || "",
+            review_status: resultStatus === "pending_teacher_review" ? "pending_teacher_review" : "auto_reviewed",
           };
         });
-        const objectiveRows = answers.filter((row) => row.is_correct !== null);
-        const score = objectiveRows.reduce((sum, row) => sum + Number(row.score || 0), 0);
-        const maxScore = objectiveRows.length;
+        const scoreSummary = attemptScoreFromAnswers(answers);
+        const { score, maxScore } = scoreSummary;
         const attempt = {
           id: crypto.randomUUID(),
           task_id: task.id,
@@ -1983,7 +2221,7 @@ function seedDiverseLocalAttempts() {
           level: task.level,
           score,
           max_score: maxScore,
-          accuracy: maxScore ? Math.round((score / maxScore) * 100) : 0,
+          accuracy: scoreSummary.accuracy,
           completed_count: answers.filter((row) => row.student_answer !== null && row.student_answer !== undefined && row.student_answer !== "").length,
           total_count: questions.length,
           duration_seconds: 95 + ((classIndex + taskIndex + studentIndex) * 37),
@@ -2034,9 +2272,26 @@ function commonErrorTags(questionStats) {
       const tags = [item.question.skill_tag, item.question.grammar_tag]
         .map((tag) => String(tag || "").trim())
         .filter(Boolean);
-      return tags.length ? `${tags.join(" / ")}（错${item.wrong}）` : "";
+      return tags.length ? `${tags.join(" / ")}（错${formatScoreValue(item.wrong)}）` : "";
     })
     .filter(Boolean);
+}
+
+function questionStatsForTask(taskQuestions, taskAnswers) {
+  return taskQuestions.map((question) => {
+    const rows = taskAnswers.filter((answer) => answer.question_id === question.id);
+    const scored = rows
+      .map((answer) => ({ answer, score: finalScoreForAnswer(answer) }))
+      .filter((row) => Number.isFinite(row.score));
+    const earned = scored.reduce((sum, row) => sum + row.score, 0);
+    return {
+      question,
+      total: scored.length,
+      correct: earned,
+      rate: scored.length ? Math.round((earned / scored.length) * 100) : 0,
+      pending: rows.length - scored.length,
+    };
+  });
 }
 
 function analyticsForClassTask(task, classRow, attempts, answers, questions) {
@@ -2048,16 +2303,7 @@ function analyticsForClassTask(task, classRow, attempts, answers, questions) {
   const taskAttemptIds = new Set(taskAttempts.map((attempt) => attempt.id));
   const taskAnswers = answers.filter((answer) => taskAttemptIds.has(answer.attempt_id));
   const taskQuestions = questions.filter((question) => question.task_id === task.id);
-  const questionStats = taskQuestions.map((question) => {
-    const rows = taskAnswers.filter((answer) => answer.question_id === question.id && answer.is_correct !== null);
-    const correct = rows.filter((answer) => answer.is_correct).length;
-    return {
-      question,
-      total: rows.length,
-      correct,
-      rate: rows.length ? Math.round((correct / rows.length) * 100) : 0,
-    };
-  });
+  const questionStats = questionStatsForTask(taskQuestions, taskAnswers);
   const latestByStudent = latestAttemptsByStudent(taskAttempts);
   return {
     task,
@@ -2169,6 +2415,10 @@ function renderAnalyticsTaskDetail({
   const classAverageDuration = averageNumber(latestByStudent.map((attempt) => attempt.duration_seconds || attempt.latest_duration_seconds).filter(Boolean));
   const weakQuestionCount = questionStats.filter((item) => item.total && item.rate < 50).length;
   const tags = commonErrorTags(questionStats);
+  const taskAttemptIds = new Set(taskAttempts.map((attempt) => attempt.id));
+  const taskAnswers = (state.data.student_answers || []).filter((answer) => taskAttemptIds.has(answer.attempt_id));
+  const categorySummary = categoryScoresForAnswers(taskQuestions, taskAnswers);
+  const reviewCounts = reviewStatusCounts(taskAnswers);
   const participantNames = [...new Set(taskAttempts.map((attempt) => attempt.student_name).filter(Boolean))];
   const studentRows = participantNames.map((studentName) => {
     const student = activeClassStudents.find((item) => normalizeAnswer(item.student_name) === normalizeAnswer(studentName)) || { student_name: studentName };
@@ -2194,6 +2444,20 @@ function renderAnalyticsTaskDetail({
         <div class="metric"><span class="muted">未掌握内容</span><strong>${weakQuestionCount}</strong></div>
         <div class="metric error-tag-metric"><span class="muted">常见错误点</span><strong>${escapeHtml(tags.length ? tags.join("；") : "暂无")}</strong></div>
       </div>
+      <div class="category-score-grid compact">
+        ${categorySummary.rows.map((row) => `
+          <div class="category-score-card">
+            <span>${escapeHtml(row.label)}</span>
+            <strong>${row.accuracy === null ? "暂无" : `${row.accuracy}%`}</strong>
+            <small>${row.maxScore ? `${formatScoreValue(row.score)} / ${row.maxScore}` : "暂无有效作答"}</small>
+          </div>
+        `).join("")}
+      </div>
+      <div class="review-status-row">
+        <span class="pill">Auto/AI reviewed: ${reviewCounts.auto}</span>
+        <span class="pill live">Teacher reviewed: ${reviewCounts.teacher}</span>
+        <span class="pill danger">Pending teacher review: ${reviewCounts.pending}</span>
+      </div>
       <div class="analytics-table-head">
         <h3>学生完成记录 / 最近得分</h3>
         <div class="segmented-control" aria-label="学生排序">
@@ -2210,7 +2474,7 @@ function renderAnalyticsTaskDetail({
               return `
                 <tr>
                   <td>${escapeHtml(student.student_name)}</td>
-                  <td>${latestAttempt ? `${escapeHtml(latestAttempt.score)} / ${escapeHtml(latestAttempt.max_score)}` : "暂无"}</td>
+                  <td>${latestAttempt ? `${escapeHtml(formatScoreValue(latestAttempt.score))} / ${escapeHtml(latestAttempt.max_score)}` : "暂无"}</td>
                   <td>${latestAttempt ? accuracyText(latestAttempt.accuracy) : "暂无"}</td>
                   <td>${studentAttempts.length}</td>
                   <td>${latestAttempt ? formatDuration(latestAttempt.duration_seconds || latestAttempt.latest_duration_seconds) : "未完成"}</td>
@@ -2226,7 +2490,7 @@ function renderAnalyticsTaskDetail({
         <div class="student-detail stack">
           <div class="row wrap">
             <h3 style="flex: 1">${escapeHtml(state.analyticsStudentName)} 的做题详情</h3>
-            <span class="pill">${escapeHtml(selectedAttempt.score)} / ${escapeHtml(selectedAttempt.max_score)} · ${escapeHtml(selectedAttempt.accuracy)}%</span>
+            <span class="pill">${escapeHtml(formatScoreValue(selectedAttempt.score))} / ${escapeHtml(selectedAttempt.max_score)} · ${escapeHtml(selectedAttempt.accuracy)}%</span>
           </div>
           <div class="table-wrap">
             <table>
@@ -2234,9 +2498,10 @@ function renderAnalyticsTaskDetail({
               <tbody>
                 ${taskQuestions.map((question) => {
                   const row = selectedAnswers.find((answer) => answer.question_id === question.id);
-                  const isWrong = row && row.is_correct === false;
-                  return `
-                    <tr class="${isWrong ? "answer-wrong" : ""}">
+              const resultStatus = finalResultForAnswer(row);
+              const isWrong = row && resultStatus === "incorrect";
+              return `
+                <tr class="${isWrong ? "answer-wrong" : ""}">
                       <td>${escapeHtml(question.prompt)}</td>
                       <td>${escapeHtml(question.type)}</td>
                       <td>${renderTeacherAnswerValue(row?.student_answer, question)}${renderTeacherAnswerReviewHint(question, row)}</td>
@@ -2259,7 +2524,7 @@ function renderAnalyticsTaskDetail({
               <tr>
                 <td>${escapeHtml(item.question.prompt)}</td>
                 <td>${escapeHtml(item.question.type)}</td>
-                <td>${item.correct}/${item.total}</td>
+                <td>${formatScoreValue(item.correct)}/${item.total}${item.pending ? ` · ${item.pending} 待确认` : ""}</td>
                 <td>
                   <div class="progress-cell">
                     <div class="progress-bar" aria-label="正确率 ${item.rate}%">
@@ -2285,7 +2550,7 @@ function renderAnalyticsTaskDetail({
               <tr>
                 <td>${escapeHtml(attempt.submitted_at ? new Date(attempt.submitted_at).toLocaleString() : "暂无")}</td>
                 <td>${escapeHtml(attempt.student_name)}</td>
-                <td>${escapeHtml(attempt.score)} / ${escapeHtml(attempt.max_score)}</td>
+                <td>${escapeHtml(formatScoreValue(attempt.score))} / ${escapeHtml(attempt.max_score)}</td>
                 <td>${accuracyText(attempt.accuracy)}</td>
                 <td>${formatDuration(attempt.duration_seconds)}</td>
               </tr>
@@ -2302,6 +2567,23 @@ const PINYIN_MAP = {
   山: "shān",
   朋友: "péng you",
   我: "wǒ",
+  你: "nǐ",
+  他: "tā",
+  她: "tā",
+  好: "hǎo",
+  你好: "nǐ hǎo",
+  人: "rén",
+  是: "shì",
+  中国: "zhōng guó",
+  年: "nián",
+  月: "yuè",
+  日: "rì",
+  星期: "xīng qī",
+  早上: "zǎo shang",
+  中午: "zhōng wǔ",
+  晚上: "wǎn shang",
+  老师: "lǎo shī",
+  同学: "tóng xué",
   喜欢: "xǐ huan",
   打: "dǎ",
   篮球: "lán qiú",
@@ -2316,7 +2598,12 @@ const PINYIN_MAP = {
 
 function pinyinFor(value) {
   const text = String(value || "").trim();
-  return PINYIN_MAP[text] || "";
+  if (PINYIN_MAP[text]) return PINYIN_MAP[text];
+  const chars = Array.from(text);
+  if (chars.length > 1 && chars.every((char) => PINYIN_MAP[char])) {
+    return chars.map((char) => PINYIN_MAP[char]).join(" ");
+  }
+  return "";
 }
 
 function accuracyClass(value) {
@@ -2333,13 +2620,24 @@ function accuracyText(value) {
 
 function hanziWithPinyin(text, pinyin) {
   const reading = pinyin || pinyinFor(text);
-  if (!reading) return escapeHtml(text);
   return `
     <span class="hanzi-reading">
-      <span class="hanzi-reading__pinyin">${escapeHtml(reading)}</span>
+      <span class="hanzi-reading__pinyin">${reading ? escapeHtml(reading) : "&nbsp;"}</span>
       <span class="hanzi-reading__hanzi">${escapeHtml(text)}</span>
     </span>
   `;
+}
+
+function containsChinese(value) {
+  return /[\u3400-\u9fff]/.test(String(value || ""));
+}
+
+function wordWithReading(text, pinyin = "") {
+  return containsChinese(text) ? hanziWithPinyin(text, pinyin) : escapeHtml(text);
+}
+
+function sentenceWordLabel(text) {
+  return escapeHtml(text);
 }
 
 function setMessage(message) {
@@ -2532,7 +2830,7 @@ function renderTaskList() {
 
 function renderQuestion(question) {
   const answer = state.answers[question.id];
-  const locked = Boolean(state.feedback[question.id]);
+  const locked = Boolean(state.feedback[question.id]) || isFeedbackPending(question, answer);
   if (question.template_id === "grammar_keyword_match") {
     const selected = Array.isArray(answer) ? answer : [];
     const blanks = Array.isArray(question.correct_answer) ? question.correct_answer.length : 1;
@@ -2629,7 +2927,7 @@ function renderQuestion(question) {
         ${shuffledWords.map((item) => {
           const used = chosenIndexes.has(item.index);
           return `
-            <button class="word ${used ? "selected" : ""}" data-action="add-word" data-question="${question.id}" data-word="${escapeHtml(item.word)}" data-index="${item.index}" ${used || locked ? "disabled" : ""}>${escapeHtml(item.word)}</button>
+            <button class="word ${used ? "selected" : ""}" data-action="add-word" data-question="${question.id}" data-word="${escapeHtml(item.word)}" data-index="${item.index}" ${used || locked ? "disabled" : ""}>${sentenceWordLabel(item.word)}</button>
           `;
         }).join("")}
       </div>
@@ -2638,12 +2936,17 @@ function renderQuestion(question) {
         <div class="sentence-answer-box__content">
           ${chosen.length ? `
             <div class="sentence-answer-words">
-              ${chosen.map((item) => `<span>${escapeHtml(typeof item === "object" ? item.word : item)}</span>`).join("")}
+              ${chosen.map((item, index) => {
+                const word = typeof item === "object" ? item.word : item;
+                return locked
+                  ? `<span>${sentenceWordLabel(word)}</span>`
+                  : `<button type="button" data-action="remove-word" data-question="${question.id}" data-answer-index="${index}" title="点击撤回 / Click to remove">${sentenceWordLabel(word)}</button>`;
+              }).join("")}
             </div>
           ` : `<span class="sentence-answer-placeholder">请选择词语组成句子</span>`}
         </div>
       </div>
-      ${locked ? "" : `<button class="secondary" data-action="clear-words" data-question="${question.id}">清空重排</button>`}
+      ${locked ? "" : `<button class="secondary" data-action="clear-words" data-question="${question.id}">清空重排 / Clear and reorder</button>`}
     `;
   }
   if (question.type === "matching") {
@@ -2660,7 +2963,7 @@ function renderQuestion(question) {
         <div class="stack">
           ${pairs.map((pair) => `
             <div class="drop-row" data-drop-left="${escapeHtml(pair.left)}">
-              <strong>${hanziWithPinyin(pair.left, pair.pinyin)}</strong>
+              <strong>${wordWithReading(pair.left, pair.pinyin)}</strong>
               <select data-match-select="${question.id}" data-left="${escapeHtml(pair.left)}" ${locked ? "disabled" : ""}>
                 <option value="">选择 / 拖拽</option>
                 ${rightEntries.map(({ right, label }) => {
@@ -2713,11 +3016,12 @@ function renderPractice() {
   const questions = getQuestions(task.id);
   const question = questions[state.activeQuestion];
   const feedback = state.feedback[question?.id];
+  const pendingFeedback = question ? isFeedbackPending(question) : false;
   const needsFeedback = question ? currentQuestionNeedsFeedback(question) : false;
   const isLastQuestion = state.activeQuestion >= questions.length - 1;
   const forwardLabel = isLastQuestion
-    ? (needsFeedback ? "检查本题 / Check" : "提交练习 / Submit")
-    : (needsFeedback ? "检查本题 / Check" : "下一题 / Next");
+    ? (pendingFeedback ? "Generating feedback..." : needsFeedback ? "检查本题 / Check" : "提交练习 / Submit")
+    : (pendingFeedback ? "Generating feedback..." : needsFeedback ? "检查本题 / Check" : "下一题 / Next");
   return layout(`
     <section class="view">
       <div class="panel row wrap">
@@ -2732,12 +3036,13 @@ function renderPractice() {
         <span class="pill">${escapeHtml(QUESTION_TYPES.find(([id]) => id === question.type)?.[1] || question.type)}</span>
         <h2>${escapeHtml(question.prompt)}</h2>
         ${renderQuestion(question)}
-        ${feedback ? `<div class="feedback ${feedback.correct === true ? "correct" : feedback.correct === false ? "incorrect" : ""}">${escapeHtml(studentFeedbackText(feedback.text))}</div>` : ""}
+        ${pendingFeedback ? `<div class="notice ai-pending"><span class="spinner"></span>AI feedback is being generated. Please wait.</div>` : ""}
+        ${feedback ? `<div class="feedback ${feedback.correct === true ? "correct" : feedback.status === "partial" ? "partial" : feedback.correct === false ? "incorrect" : ""}">${escapeHtml(studentFeedbackText(feedback.text))}</div>` : ""}
         <div class="row wrap">
-          <button class="secondary" data-action="prev-question" ${state.activeQuestion === 0 ? "disabled" : ""}>上一题 / Previous</button>
+          <button class="secondary" data-action="prev-question" ${state.activeQuestion === 0 || pendingFeedback ? "disabled" : ""}>上一题 / Previous</button>
           ${state.activeQuestion < questions.length - 1
-            ? `<button data-action="next-question">${forwardLabel}</button>`
-            : `<button data-action="submit-task">${forwardLabel}</button>`}
+            ? `<button data-action="next-question" ${pendingFeedback ? "disabled" : ""}>${forwardLabel}</button>`
+            : `<button data-action="submit-task" ${pendingFeedback ? "disabled" : ""}>${forwardLabel}</button>`}
         </div>
       </article>
     </section>
@@ -2747,8 +3052,12 @@ function renderPractice() {
 function renderSummary() {
   const summary = state.summary;
   const task = getTask(state.selectedTaskId);
-  const scoreText = summary.maxScore ? `${summary.score}/${summary.maxScore}` : summary.openCount ? "Awaiting review" : "0/0";
+  const categorySummary = summary.categorySummary || { rows: [], overall: summary.maxScore ? summary.accuracy : null, level: summary.maxScore ? levelFromPercent(summary.accuracy) : null };
+  const reviewCounts = summary.reviewCounts || { auto: summary.maxScore || 0, teacher: 0, pending: summary.pendingCount || summary.openCount || 0 };
+  const scoreText = summary.maxScore ? `${formatScoreValue(summary.score)}/${summary.maxScore}` : summary.openCount ? "Awaiting review" : "0/0";
   const accuracyTextValue = summary.maxScore ? `${summary.accuracy}%` : summary.openCount ? "Pending" : "0%";
+  const overallText = categorySummary.overall === null || categorySummary.overall === undefined ? "Pending" : `${categorySummary.overall}%`;
+  const levelText = categorySummary.level ? `Level ${categorySummary.level}/7` : "Pending";
   return layout(`
     <section class="view">
       <div class="panel row wrap">
@@ -2763,11 +3072,101 @@ function renderSummary() {
       <div class="grid">
         <div class="card"><span class="muted">Score</span><div class="result-number">${escapeHtml(scoreText)}</div></div>
         <div class="card"><span class="muted">Accuracy</span><div class="result-number">${escapeHtml(accuracyTextValue)}</div></div>
+        <div class="card"><span class="muted">Overall</span><div class="result-number">${escapeHtml(overallText)}</div></div>
+        <div class="card"><span class="muted">Diagnostic Level</span><div class="result-number">${escapeHtml(levelText)}</div></div>
         <div class="card"><span class="muted">Completed</span><div class="result-number">${summary.completed}/${summary.total}</div></div>
       </div>
-      ${summary.openCount ? `<div class="notice">Open-response answers are waiting for teacher review and are not included in the automatic score yet.</div>` : ""}
+      <div class="panel stack compact-panel">
+        <h3>Category scores / Skill areas</h3>
+        <div class="category-score-grid">
+          ${(categorySummary.rows || []).map((row) => `
+            <div class="category-score-card">
+              <span>${escapeHtml(row.label)}</span>
+              <strong>${row.accuracy === null ? "Pending" : `${row.accuracy}%`}</strong>
+              <small>${row.maxScore ? `${formatScoreValue(row.score)} / ${row.maxScore}` : "Not enough scored answers"}</small>
+            </div>
+          `).join("")}
+        </div>
+        <div class="review-status-row">
+          <span class="pill">Auto/AI reviewed: ${reviewCounts.auto}</span>
+          <span class="pill live">Teacher reviewed: ${reviewCounts.teacher}</span>
+          <span class="pill danger">Pending teacher review: ${reviewCounts.pending}</span>
+        </div>
+      </div>
+      ${summary.pendingCount || summary.openCount ? `<div class="notice">Some answers are waiting for teacher review. Pending answers are not counted in the score until your teacher confirms them.</div>` : ""}
     </section>
   `);
+}
+
+function aiStatusText() {
+  const status = state.aiStatus;
+  if (!status) return `<span class="muted">尚未检测 / Not checked</span>`;
+  if (status.ok) {
+    return `
+      <span class="pill live">正常 / Available</span>
+      <span class="muted">批改模型：${escapeHtml(status.reviewModel || "deepseek-v4-pro")}</span>
+      ${status.lastResponseMs ? `<span class="muted">最近耗时：${escapeHtml(String(status.lastResponseMs))} ms</span>` : ""}
+    `;
+  }
+  return `
+    <span class="pill danger">不正常 / Not available</span>
+    <span class="muted">${escapeHtml(status.message || "AI API is not configured.")}</span>
+  `;
+}
+
+function renderAiConfigBlock() {
+  const hasBrowserKey = Boolean(state.config.aiApiKey);
+  return `
+    <div class="config-bar ai-config-panel">
+      <div class="row wrap between">
+        <div>
+          <strong>AI 答案检查与反馈 / AI answer review</strong>
+          <p class="muted">开启后，文字、选择、排序、填空等题型会先用本地答案规则判断，再交给 DeepSeek 复核并生成英文学习建议。录音题暂不发送给 AI，由老师听录音后复判。</p>
+        </div>
+        <label class="switch-line">
+          <input id="config-ai-review-enabled" type="checkbox" ${state.config.aiReviewEnabled ? "checked" : ""} />
+          <span>启用 / Enable</span>
+        </label>
+      </div>
+      <div class="row wrap ai-status-row">
+        <button type="button" class="secondary" data-action="check-ai-status">检测 API 状态</button>
+        ${aiStatusText()}
+      </div>
+      <label>AI API 代理地址 / AI API proxy URL
+        <input id="config-ai-api-base-url" value="${escapeHtml(state.config.aiApiBaseUrl || "")}" placeholder="本地留空；正式站填写 Cloudflare Worker 或其他后端地址" />
+      </label>
+      <div class="grid">
+        <label>DeepSeek API 地址 / DeepSeek API base URL
+          <input id="config-ai-review-base-url" value="${escapeHtml(state.config.aiReviewBaseUrl || "https://api.deepseek.com")}" placeholder="https://api.deepseek.com" />
+        </label>
+        <label>DeepSeek 模型 / Model
+          <input id="config-ai-review-model" value="${escapeHtml(state.config.aiReviewModel || "deepseek-v4-pro")}" placeholder="deepseek-v4-pro" />
+        </label>
+        <label>推理强度 / Reasoning effort
+          <select id="config-ai-review-reasoning">
+            ${["high", "medium", "low"].map((value) => `
+              <option value="${value}" ${(state.config.aiReviewReasoningEffort || "high") === value ? "selected" : ""}>${value}</option>
+            `).join("")}
+          </select>
+        </label>
+        <label>最大输出 / Max tokens
+          <input id="config-ai-review-max-tokens" type="number" min="120" max="800" value="${escapeHtml(state.config.aiReviewMaxTokens || 320)}" />
+        </label>
+        <label>超时秒数 / Timeout seconds
+          <input id="config-ai-review-timeout" type="number" min="8" max="60" value="${escapeHtml(state.config.aiReviewTimeoutSeconds || 25)}" />
+        </label>
+      </div>
+      <label>调试用 DeepSeek API Key / Browser test API key
+        <input id="config-ai-api-key" type="password" value="${escapeHtml(state.config.aiApiKey || "")}" placeholder="正式上线建议使用 Cloudflare Worker Secret，不建议长期保存在浏览器" autocomplete="off" />
+      </label>
+      <div class="row wrap ai-status-row">
+        <span class="${hasBrowserKey ? "pill live" : "pill"}">${hasBrowserKey ? "已保存本机 key / local key saved" : "未保存本机 key / no local key"}</span>
+        <button type="button" class="secondary compact" data-action="clear-ai-api-key">删除本机 key</button>
+      </div>
+      <p class="muted">正式部署：推荐把 <code>DEEPSEEK_API_KEY</code> 存为 Cloudflare Worker Secret。这里的 key 只保存在当前浏览器，便于你个人调试和更换；静态网页无法把浏览器里的 key 做到真正保密。</p>
+      <p class="muted">本地测试：也可以在 <code>.env.local</code> 设置 <code>DEEPSEEK_API_KEY</code> 或 <code>AI_REVIEW_API_KEY</code> 后重启预览服务器。录音类答案当前由老师复判，不调用语音转文字。</p>
+    </div>
+  `;
 }
 
 function renderConfig() {
@@ -2781,6 +3180,7 @@ function renderConfig() {
       <label>Anon / public key
         <textarea id="config-key" placeholder="eyJ...">${escapeHtml(state.config.anonKey)}</textarea>
       </label>
+      ${renderAiConfigBlock()}
       <div class="row wrap">
         <button data-action="save-config">保存设置</button>
         <button class="secondary" data-action="teacher">返回后台</button>
@@ -2934,6 +3334,7 @@ function renderConfigPanel() {
       <label>Anon / public key
         <textarea id="config-key" placeholder="eyJ...">${escapeHtml(state.config.anonKey)}</textarea>
       </label>
+      ${renderAiConfigBlock()}
       <button data-action="save-config">保存设置</button>
     </section>
   `;
@@ -3058,16 +3459,7 @@ function renderAnalytics() {
   const taskAttemptIds = new Set(taskAttempts.map((attempt) => attempt.id));
   const taskAnswers = answers.filter((answer) => taskAttemptIds.has(answer.attempt_id));
   const taskQuestions = activeTask ? questions.filter((question) => question.task_id === activeTask.id) : [];
-  const questionStats = taskQuestions.map((question) => {
-    const rows = taskAnswers.filter((answer) => answer.question_id === question.id && answer.is_correct !== null);
-    const correct = rows.filter((answer) => answer.is_correct).length;
-    return {
-      question,
-      total: rows.length,
-      correct,
-      rate: rows.length ? Math.round((correct / rows.length) * 100) : 0,
-    };
-  });
+  const questionStats = questionStatsForTask(taskQuestions, taskAnswers);
   const selectedStudentAttempts = state.analyticsStudentName ? taskAttempts
     .filter((attempt) => normalizeAnswer(attempt.student_name) === normalizeAnswer(state.analyticsStudentName))
     .sort((a, b) => new Date(b.submitted_at || 0) - new Date(a.submitted_at || 0)) : [];
@@ -3261,7 +3653,8 @@ function renderAnalytics() {
                             <tbody>
                               ${taskQuestions.map((question) => {
                                 const row = selectedAnswers.find((answer) => answer.question_id === question.id);
-                                const isWrong = row && row.is_correct === false;
+                                  const resultStatus = finalResultForAnswer(row);
+                                  const isWrong = row && resultStatus === "incorrect";
                                 return `
                                   <tr class="${isWrong ? "answer-wrong" : ""}">
                                     <td>${escapeHtml(question.prompt)}</td>
@@ -3521,11 +3914,12 @@ function questionDraftFromForm(overrides = {}) {
 
 function evaluate(question, answer) {
   if (isOpenQuestion(question)) {
-    const result = analyzeOpenResponse(answer);
     return {
       isCorrect: null,
       score: 0,
-      text: `Teacher review needed\nYour answer: ${formatAnswerForStudent(answer)}\nAuto suggestion: ${result.label}\nReason: ${result.hint}\nThis answer is not counted in the score until your teacher confirms it.`,
+      status: "needs_review",
+      text: `Teacher review needed\nYour answer: ${formatAnswerForStudent(answer)}\nHint: Open-response answers need teacher confirmation unless AI review is enabled and configured.`,
+      source: "local",
     };
   }
   let correct = false;
@@ -3552,12 +3946,281 @@ function evaluate(question, answer) {
   return {
     isCorrect: correct,
     score: correct ? 1 : 0,
+    status: correct ? "correct" : "incorrect",
     text: feedbackText(question, answer, correct),
+    source: "local",
   };
 }
 
 function scoreOpenResponse(answer) {
   return analyzeOpenResponse(answer).level === "likely_correct" ? 1 : 0;
+}
+
+function aiStatusLabel(status) {
+  if (status === "correct") return "Correct";
+  if (status === "partial") return "Partly correct";
+  if (status === "incorrect") return "Incorrect";
+  return "Teacher review needed";
+}
+
+function resultFromAiReview(review, answer, transcript = "", source = "ai") {
+  const status = review?.status || "needs_review";
+  const score = Math.max(0, Math.min(1, Number(review?.score || 0)));
+  const lines = [
+    source === "ai" ? `${aiStatusLabel(status)} - AI review` : aiStatusLabel(status),
+    `Your answer: ${formatAnswerForStudent(answer)}`,
+  ];
+  if (transcript) lines.push(`Transcript: ${transcript}`);
+  if (review?.feedback) lines.push(`Feedback: ${review.feedback}`);
+  if (review?.suggestion) lines.push(`Hint: ${review.suggestion}`);
+  if (status === "needs_review") lines.push("This answer is not counted until your teacher confirms it.");
+  return {
+    isCorrect: status === "correct" ? true : status === "needs_review" ? null : false,
+    score: status === "needs_review" ? 0 : score,
+    status,
+    text: lines.join("\n"),
+    source,
+  };
+}
+
+function aiReviewEnabled() {
+  return Boolean(state.config?.aiReviewEnabled || state.config?.aiApiKey || state.config?.aiApiBaseUrl);
+}
+
+function readAiConfigFromForm() {
+  return {
+    aiReviewEnabled: Boolean(document.querySelector("#config-ai-review-enabled")?.checked),
+    aiApiBaseUrl: currentAiApiBaseUrl(),
+    aiApiKey: currentAiApiKey(),
+    aiReviewBaseUrl: currentAiReviewBaseUrl(),
+    aiReviewModel: currentAiReviewModel(),
+    aiReviewReasoningEffort: currentAiReviewReasoningEffort(),
+    aiReviewMaxTokens: currentAiReviewMaxTokens(),
+    aiReviewTimeoutSeconds: currentAiReviewTimeoutSeconds(),
+  };
+}
+
+function currentAiApiKey() {
+  const fieldValue = document.querySelector("#config-ai-api-key")?.value?.trim();
+  return fieldValue || String(state.config?.aiApiKey || "").trim();
+}
+
+function currentAiApiBaseUrl() {
+  const fieldValue = document.querySelector("#config-ai-api-base-url")?.value?.trim();
+  return fieldValue || String(state.config?.aiApiBaseUrl || "").trim();
+}
+
+function currentAiReviewBaseUrl() {
+  const fieldValue = document.querySelector("#config-ai-review-base-url")?.value?.trim();
+  return fieldValue || String(state.config?.aiReviewBaseUrl || "https://api.deepseek.com").trim();
+}
+
+function currentAiReviewModel() {
+  const fieldValue = document.querySelector("#config-ai-review-model")?.value?.trim();
+  return fieldValue || String(state.config?.aiReviewModel || "deepseek-v4-pro").trim();
+}
+
+function currentAiReviewReasoningEffort() {
+  const fieldValue = document.querySelector("#config-ai-review-reasoning")?.value?.trim();
+  return fieldValue || String(state.config?.aiReviewReasoningEffort || "high").trim();
+}
+
+function currentAiReviewMaxTokens() {
+  const fieldValue = document.querySelector("#config-ai-review-max-tokens")?.value?.trim();
+  return Number(fieldValue || state.config?.aiReviewMaxTokens || 320);
+}
+
+function currentAiReviewTimeoutSeconds() {
+  const fieldValue = document.querySelector("#config-ai-review-timeout")?.value?.trim();
+  return Number(fieldValue || state.config?.aiReviewTimeoutSeconds || 25);
+}
+
+function aiReviewConfigPayload() {
+  return {
+    aiReviewBaseUrl: currentAiReviewBaseUrl(),
+    aiReviewModel: currentAiReviewModel(),
+    aiReviewReasoningEffort: currentAiReviewReasoningEffort(),
+    aiReviewMaxTokens: currentAiReviewMaxTokens(),
+    aiReviewTimeoutSeconds: currentAiReviewTimeoutSeconds(),
+  };
+}
+
+async function postJson(path, payload) {
+  const apiBaseUrl = currentAiApiBaseUrl().replace(/\/$/, "");
+  const url = apiBaseUrl && path.startsWith("/api/ai-") ? `${apiBaseUrl}${path}` : path;
+  const aiApiKey = currentAiApiKey();
+  const headers = { "content-type": "application/json" };
+  if (aiApiKey && path.startsWith("/api/ai-")) headers["x-ai-review-key"] = aiApiKey;
+  const response = await fetch(url, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error("AI service returned an unreadable response.");
+  }
+  if (!response.ok) {
+    const error = new Error(data?.message || `AI service failed with status ${response.status}.`);
+    error.aiConfigured = data?.configured !== false;
+    error.timings = data?.timings || null;
+    throw error;
+  }
+  return data || {};
+}
+
+async function checkAiServices() {
+  try {
+    const status = await postJson("/api/ai-status", aiReviewConfigPayload());
+    if (!status.reviewConfigured) {
+      return { ...status, ok: false, message: status.message || "AI review API is not configured." };
+    }
+    const probe = await postJson("/api/ai-review", {
+      ...aiReviewConfigPayload(),
+      questionType: "open_response",
+      templateId: "ai_status_probe",
+      questionPrompt: "请用中文回答：你好吗？",
+      prompt: "请用中文回答：你好吗？",
+      correctAnswer: "我很好。",
+      expectedAnswer: "我很好。",
+      options: [],
+      localResult: { status: "correct", score: 1, isCorrect: true },
+      answerText: "我很好。",
+      answer: "我很好。",
+    });
+    return {
+      ...status,
+      reviewModel: probe.reviewModel || currentAiReviewModel(),
+      reviewBaseUrl: currentAiReviewBaseUrl(),
+      lastResponseMs: probe.timings?.totalMs || 0,
+      ok: true,
+      message: "AI review API is available.",
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      reviewConfigured: Boolean(error.aiConfigured),
+      transcribeConfigured: false,
+      lastResponseMs: error.timings?.totalMs || 0,
+      message: error.message || "AI API is not available from this site.",
+    };
+  }
+}
+
+async function transcribeAudioAnswer(audioDataUrl) {
+  const data = await postJson("/api/ai-transcribe", { audioDataUrl });
+  return String(data.text || "").trim();
+}
+
+function questionOptionsForAi(question) {
+  if (!question) return "";
+  if (question.type === "matching" && Array.isArray(question.options)) {
+    return question.options.map((pair) => ({
+      left: pair.left,
+      pinyin: pair.pinyin || "",
+      right: displayAnswerValue(pair.right),
+    }));
+  }
+  return question.options || "";
+}
+
+function localResultForAi(localResult) {
+  return {
+    status: localResult?.status || "",
+    score: Number(localResult?.score || 0),
+    isCorrect: localResult?.isCorrect,
+    feedback: localResult?.text || "",
+  };
+}
+
+async function reviewAnswerWithAi(question, answer, localResult) {
+  const audio = answerAudioValue(answer);
+  let answerText = "";
+  let transcript = "";
+  if (audio) {
+    return resultFromAiReview({
+      status: "needs_review",
+      score: 0,
+      feedback: "Recording answers need teacher listening and confirmation.",
+      suggestion: "Your teacher will listen to your recording and give the final result.",
+    }, answer, "", "local");
+  } else if (typeof answer === "string") {
+    answerText = answer.trim();
+  } else {
+    answerText = formatAnswerForStudent(answer);
+  }
+  if (!answerText) {
+    return resultFromAiReview({
+      status: "needs_review",
+      score: 0,
+      feedback: audio ? "No transcript was created for this recording." : "No written answer was submitted.",
+      suggestion: audio ? "Please ask the teacher to listen and confirm this recording." : "Write at least one short Chinese sentence.",
+    }, answer, transcript, "local");
+  }
+  const data = await postJson("/api/ai-review", {
+    ...aiReviewConfigPayload(),
+    requestKey: feedbackRequestKey(question, answer),
+    questionId: question.id,
+    taskId: question.task_id || state.selectedTaskId || "",
+    studentId: state.student?.id || "",
+    studentName: state.student?.student_name || "",
+    questionType: question.type,
+    templateId: question.template_id || "",
+    questionPrompt: question.prompt,
+    prompt: getExpressionOptions(question).prompt || question.prompt,
+    correctAnswer: question.correct_answer,
+    expectedAnswer: formatAnswerForStudent(question.correct_answer),
+    options: questionOptionsForAi(question),
+    localResult: localResultForAi(localResult),
+    answerText,
+    answer,
+  });
+  if (data.duplicate) {
+    return {
+      ...localResult,
+      text: [
+        localResult.text,
+        "AI feedback is already being generated. Please wait for the current result.",
+      ].join("\n"),
+      source: localResult.source || "local",
+    };
+  }
+  return resultFromAiReview(data.review, answer, transcript);
+}
+
+async function evaluateAsync(question, answer) {
+  const localResult = evaluate(question, answer);
+  if (!aiReviewEnabled()) return localResult;
+  try {
+    return await reviewAnswerWithAi(question, answer, localResult);
+  } catch (error) {
+    if (!isOpenQuestion(question) && !answerAudioValue(answer)) {
+      return {
+        ...localResult,
+        text: [
+          localResult.text,
+          `AI feedback unavailable: ${error.message || "AI service is not configured."}`,
+          "Your answer was checked with the local answer key only.",
+        ].join("\n"),
+      };
+    }
+    const fallback = analyzeOpenResponse(answer);
+    return {
+      isCorrect: null,
+      score: 0,
+      status: "needs_review",
+      text: [
+        "Teacher review needed",
+        `Your answer: ${formatAnswerForStudent(answer)}`,
+        `Auto review unavailable: ${error.message || "AI service is not configured."}`,
+        `Hint: ${fallback.hint}`,
+        "This answer is not counted until your teacher confirms it.",
+      ].join("\n"),
+    };
+  }
 }
 
 function analyzeOpenResponse(answer) {
@@ -3668,20 +4331,78 @@ function answerKey(answer) {
   return JSON.stringify(answer ?? null);
 }
 
+function simpleHash(text) {
+  let hash = 0;
+  const value = String(text || "");
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  }
+  return Math.abs(hash).toString(36);
+}
+
+function feedbackRequestKey(question, answer = state.answers[question?.id]) {
+  if (!question) return "";
+  return [
+    state.student?.id || state.student?.student_name || "student",
+    state.selectedTaskId || question.task_id || "task",
+    question.id,
+    simpleHash(answerKey(answer)),
+  ].join(":");
+}
+
+function isFeedbackPending(question, answer = state.answers[question?.id]) {
+  const key = feedbackRequestKey(question, answer);
+  return Boolean(key && state.aiPending[key]);
+}
+
 function currentQuestion() {
   const task = getTask(state.selectedTaskId);
   if (!task) return null;
   return getQuestions(task.id)[state.activeQuestion] || null;
 }
 
-function applyFeedback(question) {
+async function applyFeedback(question) {
   syncInputs();
-  const result = evaluate(question, state.answers[question.id]);
-  state.feedback[question.id] = {
-    correct: result.isCorrect,
-    text: result.text,
-    answerKey: answerKey(state.answers[question.id]),
+  const answer = state.answers[question.id];
+  const requestKey = feedbackRequestKey(question, answer);
+  if (state.aiPending[requestKey]) {
+    state.message = "AI feedback is already being generated. Please wait.";
+    return false;
+  }
+  state.aiPending[requestKey] = {
+    questionId: question.id,
+    startedAt: Date.now(),
   };
+  state.message = "";
+  render();
+  try {
+    const result = await evaluateAsync(question, answer);
+    state.feedback[question.id] = {
+      correct: result.isCorrect,
+        score: result.score,
+        status: result.status,
+        text: result.text,
+        source: result.source || "local",
+        answerKey: answerKey(answer),
+      };
+    return true;
+  } finally {
+    delete state.aiPending[requestKey];
+  }
+}
+
+async function evaluateForSubmission(question, answer) {
+  const feedback = state.feedback[question.id];
+  if (feedback && feedback.answerKey === answerKey(answer) && Object.prototype.hasOwnProperty.call(feedback, "score")) {
+    return {
+      isCorrect: feedback.correct,
+      score: Number(feedback.score || 0),
+      status: feedback.status,
+      text: feedback.text,
+      source: feedback.source || "local",
+    };
+  }
+  return evaluateAsync(question, answer);
 }
 
 function currentQuestionNeedsFeedback(question) {
@@ -3881,6 +4602,27 @@ function bindEvents() {
       reader.readAsDataURL(file);
     });
   });
+  document.querySelectorAll("[data-review-quick]").forEach((select) => {
+    select.addEventListener("change", () => {
+      const answerId = select.dataset.reviewQuick;
+      const value = select.value;
+      if (!answerId || !value) return;
+      const feedbackInput = document.querySelector(`[data-review-feedback="${CSS.escape(answerId)}"]`);
+      if (feedbackInput) {
+        const existing = String(feedbackInput.value || "").trim();
+        feedbackInput.value = existing ? `${existing}\n${value}` : value;
+      }
+      state.pendingReviews = {
+        ...(state.pendingReviews || {}),
+        [answerId]: {
+          ...((state.pendingReviews || {})[answerId] || {}),
+          feedback: feedbackInput?.value || value,
+        },
+      };
+      select.value = "";
+      render();
+    });
+  });
   document.querySelectorAll("[data-action]").forEach((element) => {
     element.addEventListener("click", async (event) => {
       event.preventDefault();
@@ -3920,7 +4662,7 @@ function bindEvents() {
         syncInputs();
         const question = currentQuestion();
         if (question && currentQuestionNeedsFeedback(question)) {
-          applyFeedback(question);
+          await applyFeedback(question);
           render();
           return;
         }
@@ -3967,6 +4709,15 @@ function bindEvents() {
         delete state.feedback[questionId];
         render();
       }
+      if (action === "remove-word") {
+        const questionId = element.dataset.question;
+        if (state.feedback[questionId]) return;
+        const current = Array.isArray(state.answers[questionId]) ? [...state.answers[questionId]] : [];
+        current.splice(Number(element.dataset.answerIndex), 1);
+        state.answers[questionId] = current;
+        delete state.feedback[questionId];
+        render();
+      }
       if (action === "clear-words") {
         if (state.feedback[element.dataset.question]) return;
         state.answers[element.dataset.question] = [];
@@ -3981,7 +4732,7 @@ function bindEvents() {
       }
       if (action === "check-question") {
         const question = state.data.questions.find((item) => item.id === element.dataset.question);
-        applyFeedback(question);
+        await applyFeedback(question);
         render();
       }
       if (action === "student-login") {
@@ -4028,7 +4779,7 @@ function bindEvents() {
         syncInputs();
         const question = currentQuestion();
         if (question && currentQuestionNeedsFeedback(question)) {
-          applyFeedback(question);
+          await applyFeedback(question);
           render();
           return;
         }
@@ -4038,14 +4789,34 @@ function bindEvents() {
         const url = document.querySelector("#config-url").value.trim();
         const anonKey = document.querySelector("#config-key").value.trim();
         saveConfig({
+          ...state.config,
           url,
           anonKey,
+          ...readAiConfigFromForm(),
         });
         await run(async () => {
           await api.loadAll();
           state.adminTab = "settings";
           state.view = state.teacher ? "teacher-dashboard" : "home";
         });
+      }
+      if (action === "check-ai-status") {
+        await run(async () => {
+          saveConfig({
+            ...state.config,
+            ...readAiConfigFromForm(),
+          });
+          state.aiStatus = await checkAiServices();
+          state.adminTab = "settings";
+          state.view = state.teacher ? "teacher-dashboard" : "home";
+        });
+      }
+      if (action === "clear-ai-api-key") {
+        saveConfig({ ...state.config, aiApiKey: "" });
+        state.aiStatus = null;
+        state.adminTab = "settings";
+        state.view = state.teacher ? "teacher-dashboard" : "home";
+        render();
       }
       if (action === "teacher-login") {
         const email = document.querySelector("#teacher-email").value.trim();
@@ -4118,18 +4889,34 @@ function bindEvents() {
         });
       }
       if (action === "set-review-answer") {
+        const answerId = element.dataset.answer;
         state.pendingReviews = {
           ...(state.pendingReviews || {}),
-          [element.dataset.answer]: element.dataset.correct === "true",
+          [answerId]: {
+            ...((state.pendingReviews || {})[answerId] || {}),
+            result: normalizeResultStatus(element.dataset.result) || "incorrect",
+          },
         };
         render();
       }
       if (action === "save-review-answers") {
         await run(async () => {
-          const entries = Object.entries(state.pendingReviews || {});
+          document.querySelectorAll("[data-review-feedback]").forEach((input) => {
+            const answerId = input.dataset.reviewFeedback;
+            state.pendingReviews = {
+              ...(state.pendingReviews || {}),
+              [answerId]: {
+                ...((state.pendingReviews || {})[answerId] || {}),
+                feedback: input.value,
+              },
+            };
+          });
+          const entries = Object.entries(state.pendingReviews || {}).filter(([, review]) => (
+            review && (review.result || String(review.feedback || "").trim())
+          ));
           if (!entries.length) return;
-          for (const [answerId, isCorrect] of entries) {
-            await api.reviewAnswer(answerId, isCorrect);
+          for (const [answerId, review] of entries) {
+            await api.reviewAnswer(answerId, review);
           }
           state.pendingReviews = {};
           state.view = "teacher-dashboard";
@@ -4425,19 +5212,28 @@ async function submitTask() {
   await run(async () => {
     const task = getTask(state.selectedTaskId);
     const questions = getQuestions(task.id);
-    const answerRows = questions.map((question) => {
-      const result = evaluate(question, state.answers[question.id]);
-      return {
+    const answerRows = [];
+    for (const question of questions) {
+      const result = await evaluateForSubmission(question, state.answers[question.id]);
+      const resultStatus = normalizeResultStatus(result.status) || (result.isCorrect === true ? "correct" : result.isCorrect === false ? "incorrect" : "pending_teacher_review");
+      const finalScore = scoreForResult(resultStatus);
+      const usedAiReview = result.source === "ai";
+      answerRows.push({
         question_id: question.id,
         question_type: question.type,
         student_answer: state.answers[question.id] ?? null,
         is_correct: result.isCorrect,
-        score: result.score,
-      };
-    });
-    const objectiveRows = answerRows.filter((row) => row.is_correct !== null);
-    const score = objectiveRows.reduce((sum, row) => sum + row.score, 0);
-    const maxScore = objectiveRows.length;
+        score: finalScore ?? 0,
+        auto_result: resultStatus,
+        auto_feedback: result.text || "",
+        ai_result: usedAiReview ? resultStatus : null,
+        ai_feedback: usedAiReview ? result.text : null,
+        final_score: finalScore ?? 0,
+        review_status: resultStatus === "pending_teacher_review" ? "pending_teacher_review" : (usedAiReview ? "ai_reviewed" : "auto_reviewed"),
+      });
+    }
+    const scoreSummary = attemptScoreFromAnswers(answerRows);
+    const { score, maxScore } = scoreSummary;
     const durationSeconds = state.practiceStartedAt
       ? Math.max(1, Math.round((Date.now() - Number(state.practiceStartedAt)) / 1000))
       : null;
@@ -4461,6 +5257,8 @@ async function submitTask() {
     };
     const previousScore = getStudentTaskScore(task.id);
     await api.submitAttempt(attempt, answerRows);
+    const categorySummary = categoryScoresForAnswers(questions, answerRows);
+    const reviewCounts = reviewStatusCounts(answerRows);
     const currentScore = getStudentTaskScore(task.id);
     const updatedAt = new Date().toISOString();
     const scorePayload = {
@@ -4487,7 +5285,10 @@ async function submitTask() {
       completed,
       total: questions.length,
       openCount: answerRows.filter((row) => row.is_correct === null).length,
+      pendingCount: scoreSummary.pendingCount,
       durationSeconds,
+      categorySummary,
+      reviewCounts,
     };
     state.view = "summary";
   });

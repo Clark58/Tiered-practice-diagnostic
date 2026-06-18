@@ -1,6 +1,6 @@
 # 中文分层练习与诊断 - 项目交接记录
 
-最后更新：2026-06-06
+最后更新：2026-06-16
 
 ## 项目定位
 
@@ -23,6 +23,38 @@ npm run dev
 
 项目目前没有独立测试套件。代码检查入口是 `npm run check`，会检查 `src/app.js` 和 `server.mjs` 的 JavaScript 语法。
 
+可选 AI 批改本地配置：
+
+```bash
+cp .env.example .env.local
+# 填入 AI_REVIEW_API_KEY 或 DEEPSEEK_API_KEY 后重启 npm run dev
+```
+
+注意：GitHub Pages 是纯静态托管，不能直接运行 `/api/ai-review` 或 `/api/ai-transcribe`。正式使用 AI 批改时，应把同等代理逻辑部署到 Cloudflare Worker、Vercel Function、Netlify Function 或 Supabase Edge Function，再让前端请求该后端。
+
+Cloudflare Worker 代理已放在 `cloudflare/`：
+
+```bash
+cd cloudflare
+npx wrangler login
+npx wrangler secret put DEEPSEEK_API_KEY
+npx wrangler deploy
+```
+
+如果 Wrangler OAuth 登录失败，可改用 Cloudflare API Token：
+
+```bash
+cd cloudflare
+export CLOUDFLARE_API_TOKEN="your-cloudflare-api-token"
+npx wrangler whoami
+npx wrangler secret put DEEPSEEK_API_KEY
+npx wrangler deploy
+```
+
+部署后把 Worker URL 填入老师后台 `系统设置` 的 `AI API 代理地址 / AI API proxy URL`，打开 `AI 答案检查与反馈` 开关并检测状态。当前版本录音题不发送给 AI，不做自动转文字，由老师听录音后复判。
+
+系统设置里也提供 `调试用 DeepSeek API Key / Browser test API key` 输入框，支持保存、替换、删除。该 key 只适合老师个人浏览器调试；正式公开使用仍应放到 Cloudflare Worker Secret，避免 key 暴露在浏览器端。
+
 浏览器 smoke test 应覆盖：
 
 - 学生首页能进入本地预览。
@@ -34,6 +66,11 @@ npm run dev
 
 ## 最近已完成的关键修复
 
+- 增加可选 AI 批改层：本地 `server.mjs` 提供 `/api/ai-status` 和 `/api/ai-review` 文本批改代理。
+- 老师后台 `系统设置` 增加 `AI 答案检查与反馈` 开关、API 状态检测、AI API 代理地址。开启后所有题型都会先用本地答案规则判断，再交给 DeepSeek 复核并生成英文学习建议；API 不可用时会回退到本地规则。
+- 开放文字题优先调用 AI；录音题不转写、不发送给 DeepSeek，始终进入老师复判。
+- 增加 `.env.example`，真实 API key 应写入 `.env.local` 或环境变量；`.gitignore` 已忽略真实 `.env` 文件。
+- DeepSeek 可用于全部题型的文本复核和英文反馈；录音答案由老师人工确认，避免错误转写影响成绩。
 - 修复任务包和题目保存时 `id: undefined` 覆盖新 UUID 的问题。
 - 增加本地数据修复逻辑，为旧数据里缺失 ID 的任务和题目补 ID，并尽量重新关联任务与题目。
 - 修复点击任务“编辑”后已保存题目不加载的问题。

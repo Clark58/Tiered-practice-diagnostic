@@ -79,7 +79,7 @@ create table if not exists public.student_attempts (
   class_code text not null,
   student_name text not null,
   level text not null check (level in ('level1', 'level2', 'level3')),
-  score integer not null default 0,
+  score numeric not null default 0,
   max_score integer not null default 0,
   accuracy integer not null default 0,
   completed_count integer not null default 0,
@@ -95,7 +95,18 @@ create table if not exists public.student_answers (
   question_type text not null,
   student_answer jsonb,
   is_correct boolean,
-  score integer not null default 0,
+  score numeric not null default 0,
+  final_score numeric not null default 0,
+  auto_result text not null default '',
+  auto_feedback text not null default '',
+  ai_result text,
+  ai_feedback text,
+  teacher_final_result text,
+  teacher_feedback text,
+  teacher_reviewed_at timestamptz,
+  teacher_reviewed_by text,
+  review_status text not null default 'auto_reviewed',
+  oral_feedback_quick_comments text not null default '',
   created_at timestamptz not null default now()
 );
 
@@ -105,11 +116,11 @@ create table if not exists public.student_task_scores (
   class_code text not null,
   student_name text not null,
   level text not null check (level in ('level1', 'level2', 'level3')),
-  latest_score integer not null default 0,
+  latest_score numeric not null default 0,
   latest_max_score integer not null default 0,
   latest_accuracy integer not null default 0,
   latest_duration_seconds integer,
-  best_score integer not null default 0,
+  best_score numeric not null default 0,
   attempts_count integer not null default 0,
   updated_at timestamptz not null default now(),
   unique (task_id, class_code, student_name)
@@ -121,9 +132,29 @@ create unique index if not exists idx_class_students_access_code on public.class
 
 alter table public.student_attempts
   add column if not exists duration_seconds integer;
+alter table public.student_attempts
+  alter column score type numeric using score::numeric;
+
+alter table public.student_answers
+  alter column score type numeric using score::numeric;
+alter table public.student_answers add column if not exists final_score numeric not null default 0;
+alter table public.student_answers add column if not exists auto_result text not null default '';
+alter table public.student_answers add column if not exists auto_feedback text not null default '';
+alter table public.student_answers add column if not exists ai_result text;
+alter table public.student_answers add column if not exists ai_feedback text;
+alter table public.student_answers add column if not exists teacher_final_result text;
+alter table public.student_answers add column if not exists teacher_feedback text;
+alter table public.student_answers add column if not exists teacher_reviewed_at timestamptz;
+alter table public.student_answers add column if not exists teacher_reviewed_by text;
+alter table public.student_answers add column if not exists review_status text not null default 'auto_reviewed';
+alter table public.student_answers add column if not exists oral_feedback_quick_comments text not null default '';
 
 alter table public.student_task_scores
   add column if not exists latest_duration_seconds integer;
+alter table public.student_task_scores
+  alter column latest_score type numeric using latest_score::numeric;
+alter table public.student_task_scores
+  alter column best_score type numeric using best_score::numeric;
 create index if not exists idx_questions_task_order on public.questions(task_id, sort_order);
 create index if not exists idx_attempts_task_submitted on public.student_attempts(task_id, submitted_at desc);
 create index if not exists idx_answers_question on public.student_answers(question_id);
@@ -259,6 +290,8 @@ drop function if exists public.get_student_questions(text, text, text);
 drop function if exists public.get_student_scores(text, text, text);
 drop function if exists public.upsert_student_task_score(uuid, text, text, text, integer, integer, integer);
 drop function if exists public.upsert_student_task_score(uuid, text, text, text, integer, integer, integer, integer);
+drop function if exists public.upsert_student_task_score(uuid, text, text, text, numeric, integer, integer);
+drop function if exists public.upsert_student_task_score(uuid, text, text, text, numeric, integer, integer, integer);
 
 create or replace function public.get_student_class(p_class_code text, p_student_name text)
 returns table (
@@ -364,11 +397,11 @@ returns table (
   class_code text,
   student_name text,
   level text,
-  latest_score integer,
+  latest_score numeric,
   latest_max_score integer,
   latest_accuracy integer,
   latest_duration_seconds integer,
-  best_score integer,
+  best_score numeric,
   attempts_count integer,
   updated_at timestamptz
 )
@@ -381,13 +414,16 @@ as $$
          sts.latest_duration_seconds, sts.best_score, sts.attempts_count, sts.updated_at
   from public.student_task_scores sts
   join public.tasks t on t.id = sts.task_id
-  join public.classes c on c.id = t.class_id
-  join public.class_students s on s.class_id = c.id
-  where lower(c.class_code) = lower(trim(p_class_code))
-    and lower(s.student_name) = lower(trim(p_student_name))
+  where exists (
+      select 1
+      from public.classes c
+      join public.class_students s on s.class_id = c.id
+      where lower(c.class_code) = lower(trim(p_class_code))
+        and lower(s.student_name) = lower(trim(p_student_name))
+        and s.active = true
+    )
     and lower(sts.student_name) = lower(trim(p_student_name))
     and lower(sts.class_code) = lower(trim(p_class_code))
-    and s.active = true
     and t.level = p_level
     and t.status = 'published'
   order by sts.updated_at desc;
@@ -398,7 +434,7 @@ create or replace function public.upsert_student_task_score(
   p_class_code text,
   p_student_name text,
   p_level text,
-  p_score integer,
+  p_score numeric,
   p_max_score integer,
   p_accuracy integer,
   p_duration_seconds integer default null
@@ -412,14 +448,17 @@ begin
   if not exists (
     select 1
     from public.tasks t
-    join public.classes c on c.id = t.class_id
-    join public.class_students s on s.class_id = c.id
     where t.id = p_task_id
       and t.status = 'published'
       and t.level = p_level
-      and lower(c.class_code) = lower(trim(p_class_code))
-      and lower(s.student_name) = lower(trim(p_student_name))
-      and s.active = true
+      and exists (
+        select 1
+        from public.classes c
+        join public.class_students s on s.class_id = c.id
+        where lower(c.class_code) = lower(trim(p_class_code))
+          and lower(s.student_name) = lower(trim(p_student_name))
+          and s.active = true
+      )
   ) then
     raise exception 'Student is not authorized for this task';
   end if;
@@ -467,12 +506,12 @@ revoke all on function public.get_student_class(text, text) from public;
 revoke all on function public.get_student_tasks(text, text, text) from public;
 revoke all on function public.get_student_questions(text, text, text) from public;
 revoke all on function public.get_student_scores(text, text, text) from public;
-revoke all on function public.upsert_student_task_score(uuid, text, text, text, integer, integer, integer, integer) from public;
+revoke all on function public.upsert_student_task_score(uuid, text, text, text, numeric, integer, integer, integer) from public;
 grant execute on function public.get_student_class(text, text) to anon, authenticated;
 grant execute on function public.get_student_tasks(text, text, text) to anon, authenticated;
 grant execute on function public.get_student_questions(text, text, text) to anon, authenticated;
 grant execute on function public.get_student_scores(text, text, text) to anon, authenticated;
-grant execute on function public.upsert_student_task_score(uuid, text, text, text, integer, integer, integer, integer) to anon, authenticated;
+grant execute on function public.upsert_student_task_score(uuid, text, text, text, numeric, integer, integer, integer) to anon, authenticated;
 
 drop trigger if exists tasks_set_updated_at on public.tasks;
 create trigger tasks_set_updated_at

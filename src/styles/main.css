@@ -861,6 +861,11 @@ th {
   background: #ffe2a8;
 }
 
+.pill.danger {
+  color: #fff;
+  background: var(--red);
+}
+
 .question {
   display: grid;
   gap: 14px;
@@ -887,6 +892,10 @@ th {
 }
 
 .word {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 52px;
   color: var(--ink);
   border: 1px solid #cbd8d2;
   background: #fff;
@@ -934,7 +943,12 @@ th {
   gap: 8px;
 }
 
-.sentence-answer-words span {
+.sentence-answer-words span,
+.sentence-answer-words button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
   border: 1px solid rgba(11, 122, 117, 0.18);
   border-radius: 8px;
   padding: 7px 11px;
@@ -945,6 +959,21 @@ th {
   font-weight: 800;
   line-height: 1.2;
   letter-spacing: 0;
+}
+
+.word .hanzi-reading,
+.sentence-answer-words .hanzi-reading {
+  justify-items: center;
+}
+
+.sentence-answer-words button {
+  cursor: pointer;
+}
+
+.sentence-answer-words button:hover {
+  border-color: rgba(11, 122, 117, 0.36);
+  color: var(--teal-dark);
+  background: #eef8f4;
 }
 
 .sentence-answer-placeholder {
@@ -966,9 +995,37 @@ th {
   background: #fff;
 }
 
+.feedback.partial {
+  border-left-color: #d98a00;
+  background: #fff8e8;
+}
+
 .feedback.incorrect {
   border-left-color: var(--red);
   background: #fff0ee;
+}
+
+.ai-pending {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--teal-dark);
+  font-weight: 700;
+}
+
+.spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(11, 122, 117, 0.22);
+  border-top-color: var(--teal);
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .match-board {
@@ -995,7 +1052,8 @@ th {
 
 .hanzi-reading {
   display: inline-grid;
-  gap: 2px;
+  grid-template-rows: 18px 26px;
+  gap: 1px;
   justify-items: start;
   line-height: 1.1;
 }
@@ -1004,11 +1062,14 @@ th {
   color: var(--muted);
   font-size: 14px;
   font-weight: 700;
+  line-height: 18px;
+  min-height: 18px;
 }
 
 .hanzi-reading__hanzi {
   font-size: 20px;
   font-weight: 850;
+  line-height: 26px;
 }
 
 .drag-chip {
@@ -1064,6 +1125,30 @@ th {
   border-radius: 8px;
   padding: 12px;
   background: rgba(255, 255, 255, 0.84);
+}
+
+.ai-config-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.ai-status-row {
+  align-items: center;
+}
+
+.switch-line {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  grid-auto-flow: column;
+  gap: 8px;
+  min-width: 150px;
+  color: var(--ink);
+}
+
+.switch-line input {
+  width: 18px;
+  height: 18px;
 }
 
 .class-strip-list {
@@ -1818,10 +1903,10 @@ th {
 
 .teacher-review-controls {
   display: grid;
-  grid-template-columns: minmax(72px, 1fr) repeat(2, 52px);
-  align-items: center;
-  gap: 7px;
-  min-width: 190px;
+  grid-template-columns: 1fr;
+  align-items: stretch;
+  gap: 8px;
+  min-width: 260px;
 }
 
 .teacher-review-head {
@@ -1848,6 +1933,29 @@ th {
   white-space: nowrap;
 }
 
+.teacher-review-buttons {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(48px, 1fr));
+  gap: 6px;
+}
+
+.teacher-review-buttons button.compact {
+  width: 100%;
+  min-width: 0;
+}
+
+.teacher-feedback-quick,
+.teacher-feedback-input {
+  width: 100%;
+}
+
+.teacher-feedback-input {
+  min-height: 68px;
+  resize: vertical;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
 .teacher-review-controls .active {
   color: #fff;
   background: var(--teal);
@@ -1856,6 +1964,43 @@ th {
 .teacher-review-controls .warning-text.active {
   color: #fff;
   background: var(--red);
+}
+
+.category-score-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.category-score-grid.compact {
+  margin: 4px 0;
+}
+
+.category-score-card {
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #f7fbf9;
+}
+
+.category-score-card span {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.category-score-card strong {
+  display: block;
+  margin-top: 4px;
+  font-size: 18px;
+}
+
+.review-status-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .danger-zone {
@@ -1924,6 +2069,7 @@ th {
   .level-tabs,
   .template-category-grid,
   .analytics-summary__grid,
+  .category-score-grid,
   .metric-row,
   .preview-level-actions,
   .student-register-grid {
